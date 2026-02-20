@@ -1,6 +1,27 @@
 [package]
 name = "rehearsa"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Rehearsa Contributors"]
+description = "Restore rehearsal engine for Docker-based self-hosted environments."
+license = "MIT"
+repository = "https://github.com/rehearsa/rehearsa"
+readme = "README.md"
+homepage = "https://github.com/rehearsa/rehearsa"
+documentation = "https://github.com/rehearsa/rehearsa"
+keywords = ["docker", "backup", "restore", "self-hosting", "disaster-recovery"]
+categories = ["command-line-utilities"]
 
 [dependencies]
+bollard = "0.16"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "rehearsa"
+path = "src/main.rs"
