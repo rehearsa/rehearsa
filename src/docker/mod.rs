@@ -1,33 +1,16 @@
-use bollard::Docker;
-use bollard::container::ListContainersOptions;
+pub mod list;
+pub mod inspect;
+pub mod compose;
 
-pub async fn list_containers() -> Result<(), Box<dyn std::error::Error>> {
-    let docker = Docker::connect_with_local_defaults()?;
+pub use inspect::inspect_container;
 
-    let options = Some(ListContainersOptions::<String> {
-        all: true,
-        ..Default::default()
-    });
+pub mod network;
 
-    let containers = docker.list_containers(options).await?;
+pub use network::{create_isolated_network, remove_network};
 
-    if containers.is_empty() {
-        println!("No containers found.");
-        return Ok(());
-    }
+pub mod clone;
 
-    for container in containers {
-        let names = container.names.unwrap_or_default();
-        let image = container.image.unwrap_or_default();
-        let state = container.state.unwrap_or_default();
+pub use clone::{clone_mounts, cleanup_clone};
+pub mod sandbox;
 
-        println!(
-            "Name: {:<30} Image: {:<25} State: {}",
-            names.join(","),
-            image,
-            state
-        );
-    }
-
-    Ok(())
-}
+pub use sandbox::{create_and_run_sandbox, remove_sandbox};

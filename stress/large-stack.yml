@@ -1,0 +1,62 @@
+services:
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: example
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+
+  worker1:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+    depends_on: [redis]
+
+  worker2:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+    depends_on: [postgres]
+
+  worker3:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+    depends_on: [redis, postgres]
+
+  worker4:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker5:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker6:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker7:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker8:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker9:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]
+
+  worker10:
+    image: busybox
+    command: ["sh", "-c", "sleep 60"]

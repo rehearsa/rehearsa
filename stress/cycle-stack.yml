@@ -1,0 +1,18 @@
+services:
+  a:
+    image: busybox
+    command: ["sh", "-c", "sleep 30"]
+    depends_on:
+      - b
+
+  b:
+    image: busybox
+    command: ["sh", "-c", "sleep 30"]
+    depends_on:
+      - c
+
+  c:
+    image: busybox
+    command: ["sh", "-c", "sleep 30"]
+    depends_on:
+      - a
