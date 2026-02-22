@@ -1,0 +1,10 @@
+services:
+  broken:
+    image: busybox
+    command: ["sh", "-c", "sleep 300"]
+    healthcheck:
+      test: ["CMD", "false"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
