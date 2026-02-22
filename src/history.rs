@@ -136,7 +136,6 @@ pub fn load_latest(stack: &str) -> Option<RunRecord> {
 
     let latest = entries.last()?;
     let content = fs::read_to_string(latest).ok()?;
-
     serde_json::from_str(&content).ok()
 }
 
@@ -179,7 +178,6 @@ pub fn calculate_stability(stack: &str, window: usize) -> u32 {
 
     if count == 0 { 100 } else { total / count }
 }
-
 // ======================================================
 // LIST STACKS
 // ======================================================
@@ -198,7 +196,9 @@ pub fn list_stacks() -> Result<(), String> {
     for entry in fs::read_dir(history_dir)
         .map_err(|e| format!("Failed to read history dir: {}", e))?
     {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let entry = entry
+            .map_err(|e| format!("Failed to read entry: {}", e))?;
+
         if entry.path().is_dir() {
             println!("{}", entry.file_name().to_string_lossy());
         }
@@ -250,13 +250,11 @@ pub fn show_stack(stack: &str) -> Result<(), String> {
 
     Ok(())
 }
-
 // ======================================================
 // STATUS
 // ======================================================
 
 pub fn status_all() -> Result<(), String> {
-
     control::set_override(true);
 
     let home = dirs::home_dir()
@@ -276,11 +274,7 @@ pub fn status_all() -> Result<(), String> {
 
     println!(
         "{:<20} {:<12} {:<12} {:<12} {:<6}",
-        "Stack",
-        "Confidence",
-        "Risk",
-        "Stability",
-        "Trend"
+        "Stack", "Confidence", "Risk", "Stability", "Trend"
     );
 
     println!("{}", "────────────────────────────────────────────────────────".dimmed());
@@ -294,7 +288,6 @@ pub fn status_all() -> Result<(), String> {
     stacks.sort();
 
     for stack_path in stacks {
-
         let stack_name = stack_path
             .file_name()
             .unwrap()
@@ -303,58 +296,55 @@ pub fn status_all() -> Result<(), String> {
 
         if let Some(latest) = load_latest(&stack_name) {
 
-            // -------------------------------
-            // Confidence Coloring
-            // -------------------------------
-            let confidence_str = format!("{}%", latest.confidence);
-
-            let confidence_colored = match latest.confidence {
-                90..=100 => confidence_str.green(),
-                70..=89 => confidence_str.yellow(),
-                40..=69 => confidence_str.bright_red(),
-                _ => confidence_str.red(),
-            };
-
-            // -------------------------------
-            // Risk Coloring
-            // -------------------------------
-            let risk_colored = match latest.risk.as_str() {
-                "LOW" => latest.risk.green(),
-                "MODERATE" => latest.risk.yellow(),
-                "HIGH" => latest.risk.bright_red(),
-                "CRITICAL" => latest.risk.red(),
-                _ => latest.risk.normal(),
-            };
-
-            // -------------------------------
-            // Stability
-            // -------------------------------
             let stability = calculate_stability(&stack_name, 5);
-            let stability_str = format!("{}%", stability);
-
-            // -------------------------------
-            // Trend Arrow
-            // -------------------------------
             let analysis = analyze_regression(
                 &stack_name,
                 latest.confidence,
                 latest.duration_seconds,
             );
 
-            let trend_symbol = match analysis.trend.as_deref() {
-                Some("UP") => "↑".green(),
-                Some("DOWN") => "↓".red(),
-                Some("SAME") => "→".yellow(),
-                _ => "-".normal(),
+            // Pre-pad raw values
+            let stack_col = format!("{:<20}", stack_name);
+            let confidence_raw = format!("{:<12}", format!("{}%", latest.confidence));
+            let risk_raw = format!("{:<12}", latest.risk);
+            let stability_col = format!("{:<12}", format!("{}%", stability));
+            let trend_raw = format!("{:<6}", match analysis.trend.as_deref() {
+                Some("UP") => "↑",
+                Some("DOWN") => "↓",
+                Some("SAME") => "→",
+                _ => "-",
+            });
+
+            // Apply color AFTER padding
+            let confidence_col = match latest.confidence {
+                90..=100 => confidence_raw.green(),
+                70..=89 => confidence_raw.yellow(),
+                40..=69 => confidence_raw.bright_red(),
+                _ => confidence_raw.red(),
+            };
+
+            let risk_col = match latest.risk.as_str() {
+                "LOW" => risk_raw.green(),
+                "MODERATE" => risk_raw.yellow(),
+                "HIGH" => risk_raw.bright_red(),
+                "CRITICAL" => risk_raw.red(),
+                _ => risk_raw.normal(),
+            };
+
+            let trend_col = match analysis.trend.as_deref() {
+                Some("UP") => trend_raw.green(),
+                Some("DOWN") => trend_raw.red(),
+                Some("SAME") => trend_raw.yellow(),
+                _ => trend_raw.normal(),
             };
 
             println!(
-                "{:<20} {:<12} {:<12} {:<12} {:<6}",
-                stack_name,
-                confidence_colored,
-                risk_colored,
-                stability_str,
-                trend_symbol
+                "{}{}{}{}{}",
+                stack_col,
+                confidence_col,
+                risk_col,
+                stability_col,
+                trend_col
             );
         }
     }
@@ -362,6 +352,7 @@ pub fn status_all() -> Result<(), String> {
     println!();
     Ok(())
 }
+
 // ======================================================
 // REGRESSION ANALYSIS
 // ======================================================
@@ -416,5 +407,6 @@ pub fn analyze_regression(
             trend: None,
             duration_delta_percent: None,
         }
+
     }
 }

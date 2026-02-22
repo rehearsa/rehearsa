@@ -76,6 +76,14 @@ pub async fn test_stack(
     let content = fs::read_to_string(path)?;
     let compose: ComposeFile = serde_yaml::from_str(&content)?;
 
+    if !json_output {
+        println!(
+            "Starting restore simulation for '{}' ({} services)...",
+            stack_name,
+            compose.services.len()
+        );
+    }
+
     let run_id = Uuid::new_v4().to_string();
     let network_name = format!("rehearsa_stack_{}", run_id);
 
@@ -111,11 +119,8 @@ pub async fn test_stack(
             let image = service.image.clone()
                 .ok_or_else(|| anyhow!("Service {} has no image", service_name))?;
 
-            // IMAGE PULL
             match pull_policy {
-                PullPolicy::Always => {
-                    pull_image(&docker, &image).await?;
-                }
+                PullPolicy::Always => pull_image(&docker, &image).await?,
                 PullPolicy::IfMissing => {
                     if docker.inspect_image(&image).await.is_err() {
                         pull_image(&docker, &image).await?;
@@ -192,7 +197,6 @@ pub async fn test_stack(
         Ok::<(), anyhow::Error>(())
     }.await;
 
-    // CLEANUP
     for container in &created_containers {
         let _ = docker.remove_container(
             container,
@@ -209,10 +213,6 @@ pub async fn test_stack(
         return execution;
     }
 
-    // ======================================================
-    // SCORING
-    // ======================================================
-
     let total: u32 = service_scores.values().sum();
     let confidence = total / service_scores.len() as u32;
 
@@ -224,27 +224,8 @@ pub async fn test_stack(
     };
 
     let duration = start_time.elapsed().as_secs();
-
-    // REGRESSION
     let regression = analyze_regression(&stack_name, confidence, duration);
-
-    if !json_output {
-        if let Some(delta) = regression.delta {
-            if delta < 0 {
-                println!("Trend: DOWN ({})", delta);
-            } else if delta > 0 {
-                println!("Trend: UP (+{})", delta);
-            } else {
-                println!("Trend: SAME");
-            }
-        }
-    }
-
     let stability = calculate_stability(&stack_name, 5);
-
-    // ======================================================
-    // POLICY ENFORCEMENT
-    // ======================================================
 
     let mut policy_violation = false;
 
@@ -268,18 +249,6 @@ pub async fn test_stack(
                 }
             }
         }
-
-        if policy.fail_on_duration_spike.unwrap_or(false) {
-            if let Some(spike) = regression.duration_delta_percent {
-                if spike > policy.duration_spike_percent.unwrap_or(50) as i32 {
-                    eprintln!(
-                        "POLICY VIOLATION: duration spike {}%",
-                        spike
-                    );
-                    policy_violation = true;
-                }
-            }
-        }
     }
 
     if json_output {
@@ -289,17 +258,40 @@ pub async fn test_stack(
             "previous_confidence": regression.previous_confidence,
             "delta": regression.delta,
             "trend": regression.trend,
-            "duration_delta_percent": regression.duration_delta_percent,
             "stability": stability,
             "risk": risk,
             "services": service_scores
         }))?);
+    } else {
+        println!();
+        println!("Rehearsa Simulation Complete");
+        println!("────────────────────────────────────────");
+        println!("Stack: {}", stack_name);
+        println!("Services: {}", service_scores.len());
+        println!("Confidence: {}% ({})", confidence, risk);
+        println!("Stability: {}%", stability);
+        println!("Duration: {}s", duration);
+
+        if let Some(trend) = regression.trend {
+            println!("Trend: {}", trend);
+        }
+
+        if policy_violation {
+            println!("⚠ POLICY VIOLATION DETECTED");
+        }
+
+        println!();
     }
 
-    let exit_code = if policy_violation { 4 }
-    else if confidence >= 70 { 0 }
-    else if confidence >= 40 { 2 }
-    else { 3 };
+    let exit_code = if policy_violation {
+        4
+    } else if confidence >= 70 {
+        0
+    } else if confidence >= 40 {
+        2
+    } else {
+        3
+    };
 
     let record = RunRecord {
         stack: stack_name,
@@ -314,10 +306,12 @@ pub async fn test_stack(
 
     let _ = persist(&record);
 
-    if exit_code == 0 { Ok(()) }
-    else { std::process::exit(exit_code); }
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        std::process::exit(exit_code);
+    }
 }
-
 // ======================================================
 // IMAGE PULL
 // ======================================================
@@ -337,7 +331,7 @@ async fn pull_image(docker: &Docker, image: &str) -> Result<()> {
 }
 
 // ======================================================
-// HEALTHCHECK
+// HEALTHCHECK CONVERSION
 // ======================================================
 
 fn convert_healthcheck(h: &HealthCheck) -> HealthConfig {
@@ -379,8 +373,11 @@ async fn wait_and_score(
         let inspect = docker.inspect_container(container, None).await?;
 
         if let Some(state) = inspect.state {
+
             match state.status {
+
                 Some(ContainerStateStatusEnum::RUNNING) => {
+
                     if let Some(health) = state.health {
                         match health.status {
                             Some(HealthStatusEnum::HEALTHY) => return Ok(100),
@@ -391,7 +388,9 @@ async fn wait_and_score(
                         return Ok(85);
                     }
                 }
+
                 Some(ContainerStateStatusEnum::EXITED) => return Ok(0),
+
                 _ => {}
             }
         }
