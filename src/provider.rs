@@ -155,6 +155,31 @@ pub fn add_provider(
     Ok(())
 }
 
+/// Set Model B verification options on an existing provider.
+pub fn set_provider_verify(
+    name: &str,
+    max_snapshot_age_hours: Option<u64>,
+    test_restore: bool,
+) -> io::Result<()> {
+    let mut registry = load_registry()?;
+    let provider = registry.get_mut(name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("No provider found with name '{}'.", name))
+    })?;
+
+    if let Some(age) = max_snapshot_age_hours {
+        provider.verify.max_snapshot_age_hours = Some(age);
+        println!("Set max snapshot age: {}h", age);
+    }
+    if test_restore {
+        provider.verify.test_restore = true;
+        println!("Set test restore: true");
+    }
+
+    save_registry(&registry)?;
+    println!("Provider '{}' verification options updated.", name);
+    Ok(())
+}
+
 /// Print a single provider's config.
 pub fn show_provider(name: &str) -> io::Result<()> {
     let registry = load_registry()?;
@@ -310,15 +335,32 @@ fn verify_restic(provider: &ProviderConfig) -> io::Result<()> {
         }
     }
 
-    // Model B scaffold: age and test-restore checks
-    if provider.verify.max_snapshot_age_hours.is_some() || provider.verify.test_restore {
-        println!();
-        println!("{}", "─".repeat(50));
-        if provider.verify.max_snapshot_age_hours.is_some() {
-            println!("⚙  Snapshot age enforcement : not yet implemented (scaffolded for Model B)");
-        }
-        if provider.verify.test_restore {
-            println!("⚙  Test restore             : not yet implemented (scaffolded for Model B)");
+    // Model B: snapshot age enforcement
+    if let Some(max_age_hours) = provider.verify.max_snapshot_age_hours {
+        if let Some(latest) = snapshots.as_array().and_then(|a| a.first()) {
+            if let Some(time_str) = latest.get("time").and_then(|t| t.as_str()) {
+                match chrono::DateTime::parse_from_rfc3339(time_str) {
+                    Ok(snapshot_time) => {
+                        let age_hours = chrono::Utc::now()
+                            .signed_duration_since(snapshot_time.with_timezone(&chrono::Utc))
+                            .num_hours();
+                        println!("Snapshot age : {}h (max: {}h)", age_hours, max_age_hours);
+                        if age_hours as u64 > max_age_hours {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!(
+                                    "Snapshot is {}h old — exceeds max age of {}h. Run a backup.",
+                                    age_hours, max_age_hours
+                                ),
+                            ));
+                        }
+                        println!("Age check    : ✓ OK");
+                    }
+                    Err(_) => {
+                        println!("Age check    : ⚠ Could not parse snapshot timestamp");
+                    }
+                }
+            }
         }
     }
 
@@ -421,15 +463,42 @@ fn verify_borg(provider: &ProviderConfig) -> io::Result<()> {
         }
     }
 
-    // Model B scaffold: age enforcement lives here when implemented
-    if provider.verify.max_snapshot_age_hours.is_some() || provider.verify.test_restore {
-        println!();
-        println!("{}", "─".repeat(50));
-        if provider.verify.max_snapshot_age_hours.is_some() {
-            println!("⚙  Snapshot age enforcement : not yet implemented (scaffolded for Model B)");
-        }
-        if provider.verify.test_restore {
-            println!("⚙  Test restore             : not yet implemented (scaffolded for Model B)");
+    // Model B: snapshot age enforcement for Borg
+    if let Some(max_age_hours) = provider.verify.max_snapshot_age_hours {
+        if let Some(latest) = parsed
+            .get("archives")
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+        {
+            if let Some(time_str) = latest.get("time").and_then(|t| t.as_str()) {
+                // Borg timestamps: "2026-02-23T03:00:01.123456"
+                let normalized = if time_str.len() > 19 {
+                    format!("{}Z", &time_str[..19])
+                } else {
+                    format!("{}Z", time_str)
+                };
+                match chrono::DateTime::parse_from_rfc3339(&normalized) {
+                    Ok(archive_time) => {
+                        let age_hours = chrono::Utc::now()
+                            .signed_duration_since(archive_time.with_timezone(&chrono::Utc))
+                            .num_hours();
+                        println!("Archive age  : {}h (max: {}h)", age_hours, max_age_hours);
+                        if age_hours as u64 > max_age_hours {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!(
+                                    "Archive is {}h old — exceeds max age of {}h. Run a backup.",
+                                    age_hours, max_age_hours
+                                ),
+                            ));
+                        }
+                        println!("Age check    : ✓ OK");
+                    }
+                    Err(_) => {
+                        println!("Age check    : ⚠ Could not parse archive timestamp");
+                    }
+                }
+            }
         }
     }
 

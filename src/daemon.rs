@@ -554,9 +554,19 @@ async fn trigger_rehearsal(
             }
         }
         Err(e) => {
-            let msg = format!("Rehearsal failed: {}", e);
-            eprintln!("[{}] {} for '{}'", Utc::now().to_rfc3339(), msg, stack);
-            notify(stack, NotifyEvent::RehearsalFatalError, &msg, notify_channel);
+            let msg = format!("{}", e);
+            // Lock contention is expected when scheduler and file watcher both
+            // fire simultaneously. Log as a skip, not a failure — no notification.
+            if msg.contains("already being rehearsed") {
+                println!(
+                    "[{}] Rehearsal skipped for '{}' — already in progress (lock held)",
+                    Utc::now().to_rfc3339(), stack
+                );
+            } else {
+                let full_msg = format!("Rehearsal failed: {}", msg);
+                eprintln!("[{}] {} for '{}'", Utc::now().to_rfc3339(), full_msg, stack);
+                notify(stack, NotifyEvent::RehearsalFatalError, &full_msg, notify_channel);
+            }
         }
     }
 }

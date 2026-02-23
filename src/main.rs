@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use chrono;
 use std::process::exit;
 
-use engine::stack::{test_stack, PullPolicy};
+use engine::stack::{test_stack, PullPolicy, cleanup_orphans};
 use policy::{StackPolicy, save_policy, show_policy, delete_policy};
 use baseline::{
     StackBaseline,
@@ -85,6 +85,8 @@ enum Commands {
     },
     Status,
     Version,
+    /// Remove orphaned containers and networks left by crashed rehearsals.
+    Cleanup,
     /// Generate a compliance report for a stack or the full fleet.
     Report {
         /// Stack name. Omit for a fleet-wide report covering all stacks.
@@ -187,6 +189,9 @@ enum BaselineCommands {
         #[arg(long)]
         stack: Option<String>,
     },
+    /// Rehearse all watched stacks and pin initial baselines.
+    /// Run once after first install to establish a starting contract for every stack.
+    AutoInit,
 }
 
 #[derive(Subcommand)]
@@ -324,6 +329,16 @@ enum ProviderCommands {
     /// Verify a provider's repository is reachable and has snapshots
     Verify {
         name: String,
+    },
+    /// Set Model B verification options on a provider
+    VerifySet {
+        name: String,
+        /// Maximum snapshot age in hours before verification fails
+        #[arg(long)]
+        max_age_hours: Option<u64>,
+        /// Require a test restore before each rehearsal
+        #[arg(long, default_value_t = false)]
+        test_restore: bool,
     },
 }
 
@@ -648,6 +663,88 @@ async fn main() {
                     exit(1);
                 }
             }
+
+            BaselineCommands::AutoInit => {
+                let registry = match daemon::load_registry() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Failed to load watch registry: {}", e);
+                        exit(1);
+                    }
+                };
+
+                if registry.watches.is_empty() {
+                    eprintln!("No watched stacks found. Add stacks with: rehearsa daemon watch <stack> <compose-file>");
+                    exit(1);
+                }
+
+                println!("Rehearsa Baseline Auto-Init");
+                println!("{}", "─".repeat(60));
+                println!("Running initial rehearsal for {} stack(s)...", registry.watches.len());
+                println!("Note: these baselines reflect current infrastructure state.");
+                println!("      Review scores and adjust policy before relying on them.");
+                println!();
+
+                let mut passed = 0;
+                let mut failed = 0;
+
+                for watch in &registry.watches {
+                    print!("  {} ... ", watch.stack);
+
+                    match test_stack(
+                        &watch.compose_path,
+                        120,
+                        false,
+                        None,
+                        false,
+                        PullPolicy::IfMissing,
+                    ).await {
+                        Ok(summary) => {
+                            // Pin whatever came back as the initial baseline
+                            if let Some(latest) = history::load_latest(&watch.stack) {
+                                let b = baseline::StackBaseline {
+                                    stack: watch.stack.clone(),
+                                    expected_services: latest.services.keys().cloned().collect(),
+                                    expected_confidence: latest.confidence,
+                                    expected_readiness: latest.readiness,
+                                    expected_duration: latest.duration_seconds,
+                                    service_scores: latest.services,
+                                    pinned_at: Some(latest.timestamp.clone()),
+                                    promoted_at: Some(chrono::Utc::now().to_rfc3339()),
+                                };
+                                match baseline::save_baseline(&watch.stack, &b) {
+                                    Ok(_) => {
+                                        println!("✓ confidence {}%  readiness {}%  [INITIAL BASELINE SET]",
+                                            summary.confidence, summary.readiness);
+                                        passed += 1;
+                                    }
+                                    Err(e) => {
+                                        println!("✗ rehearsal ok but baseline save failed: {}", e);
+                                        failed += 1;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("✗ rehearsal failed: {}", e);
+                            failed += 1;
+                        }
+                    }
+                }
+
+                println!();
+                println!("{}", "─".repeat(60));
+                println!("Complete: {} pinned, {} failed", passed, failed);
+                println!();
+                println!("Next steps:");
+                println!("  rehearsa status                    — review fleet scores");
+                println!("  rehearsa baseline show <stack>     — inspect a contract");
+                println!("  rehearsa policy set <stack> ...    — enforce standards");
+
+                if failed > 0 {
+                    exit(1);
+                }
+            }
         },
 
         // ==================================================
@@ -840,6 +937,12 @@ async fn main() {
                     exit(1);
                 }
             }
+            ProviderCommands::VerifySet { name, max_age_hours, test_restore } => {
+                if let Err(e) = provider::set_provider_verify(&name, max_age_hours, test_restore) {
+                    eprintln!("Provider error: {}", e);
+                    exit(1);
+                }
+            }
         },
 
         // ==================================================
@@ -874,6 +977,19 @@ async fn main() {
 
             if let Err(e) = report::run_report(&args) {
                 eprintln!("Error: {}", e);
+                exit(1);
+            }
+        }
+
+        // ==================================================
+        // CLEANUP
+        // ==================================================
+
+        Commands::Cleanup => {
+            println!("Scanning for orphaned rehearsal resources...");
+            println!();
+            if let Err(e) = cleanup_orphans().await {
+                eprintln!("Cleanup error: {}", e);
                 exit(1);
             }
         }

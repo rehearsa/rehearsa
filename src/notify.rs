@@ -682,9 +682,7 @@ fn send_smtp(cfg: &EmailConfig, subject: &str, body: &str) -> io::Result<()> {
 }
 
 fn send_sendgrid(cfg: &EmailConfig, subject: &str, body: &str) -> io::Result<()> {
-    // Sendgrid delivery via HTTP API — scaffolded.
-    // Resolves the API key and validates config but does not yet send.
-    let _api_key = match (&cfg.sendgrid_api_key, &cfg.sendgrid_api_key_env) {
+    let api_key = match (&cfg.sendgrid_api_key, &cfg.sendgrid_api_key_env) {
         (Some(k), _) => k.clone(),
         (_, Some(env_var)) => std::env::var(env_var).map_err(|_| {
             io::Error::new(
@@ -698,13 +696,56 @@ fn send_sendgrid(cfg: &EmailConfig, subject: &str, body: &str) -> io::Result<()>
         )),
     };
 
-    // Suppress unused variable warnings for scaffolded fields
-    let _ = (subject, body, &cfg.from, &cfg.to);
+    if cfg.to.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No recipient addresses configured.",
+        ));
+    }
 
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Sendgrid delivery is scaffolded but not yet implemented. Use SMTP for now.",
-    ))
+    // Build Sendgrid v3 /mail/send payload
+    let personalizations: Vec<serde_json::Value> = cfg.to.iter().map(|addr| {
+        serde_json::json!({ "to": [{ "email": addr }] })
+    }).collect();
+
+    let payload = serde_json::json!({
+        "personalizations": personalizations,
+        "from": { "email": cfg.from },
+        "subject": subject,
+        "content": [{ "type": "text/plain", "value": body }]
+    });
+
+    let body_str = serde_json::to_string(&payload)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("--silent")
+       .arg("--show-error")
+       .arg("--fail")
+       .arg("--max-time").arg("15")
+       .arg("-X").arg("POST")
+       .arg("https://api.sendgrid.com/v3/mail/send")
+       .arg("-H").arg("Content-Type: application/json")
+       .arg("-H").arg(format!("Authorization: Bearer {}", api_key))
+       .arg("-d").arg(&body_str);
+
+    let output = cmd.output().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Failed to run curl (is it installed?): {}", e),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Sendgrid delivery failed: {} {}", stderr.trim(), stdout.trim()),
+        ));
+    }
+
+    Ok(())
 }
 
 // ======================================================

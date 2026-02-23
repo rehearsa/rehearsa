@@ -73,11 +73,23 @@ pub async fn test_stack(
 ) -> Result<StackRunSummary> {
 
     let compose_path = Path::new(path);
+
+    // Derive a unique stack name from the parent directory name.
+    // Falls back to file stem if no parent directory is available.
+    // This prevents collisions when multiple stacks are all named
+    // docker-compose.yml in different directories.
     let stack_name = compose_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty() && n != ".")
+        .unwrap_or_else(|| {
+            compose_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
 
     if strict_integrity {
         validate_stack_integrity(&stack_name)
@@ -100,6 +112,7 @@ pub async fn test_stack(
     let env_map: HashMap<String, String> = std::env::vars().collect();
 
     let preflight_ctx = PreflightContext {
+        compose_raw: content.clone(),
         compose: &compose,
         docker: &docker,
         environment: env_map,
@@ -234,6 +247,26 @@ pub async fn test_stack(
 
             let mut score =
                 wait_and_score(&docker, &container_name, timeout).await?;
+
+            // Oneshot services exit cleanly by design — score exit-0 as 100
+            if score == 0 {
+                let is_oneshot = service.labels
+                    .as_ref()
+                    .and_then(|l| l.get("com.rehearsa.oneshot"))
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false);
+
+                if is_oneshot {
+                    // Verify the container actually exited cleanly (exit code 0)
+                    if let Ok(inspect) = docker.inspect_container(&container_name, None).await {
+                        if let Some(state) = inspect.state {
+                            if state.exit_code == Some(0) {
+                                score = 100;
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Some(ref target) = inject_failure {
                 if target == &service_name {
@@ -581,4 +614,76 @@ async fn wait_and_score(
     }
 
     Ok(0)
+}
+
+// ======================================================
+// ORPHAN CLEANUP
+// ======================================================
+
+/// Remove any containers and networks left behind by crashed rehearsals.
+/// Rehearsa prefixes all temporary resources with "rehearsa_" — anything
+/// matching that prefix that is not currently running a rehearsal is orphaned.
+pub async fn cleanup_orphans() -> Result<()> {
+    let docker = Docker::connect_with_local_defaults()?;
+
+    let containers = docker.list_containers(
+        Some(bollard::container::ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        })
+    ).await?;
+
+    let mut removed_containers = 0;
+
+    for container in containers {
+        let names = container.names.unwrap_or_default();
+        let is_rehearsa = names.iter().any(|n| {
+            n.trim_start_matches('/').starts_with("rehearsa_")
+        });
+
+        if is_rehearsa {
+            if let Some(id) = container.id {
+                let name = names.first().cloned().unwrap_or_default();
+                print!("Removing container {} ... ", name.trim_start_matches('/'));
+                match docker.remove_container(
+                    &id,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                ).await {
+                    Ok(_) => { println!("✓"); removed_containers += 1; }
+                    Err(e) => println!("✗ ({})", e),
+                }
+            }
+        }
+    }
+
+    let networks = docker.list_networks(
+        Some(bollard::network::ListNetworksOptions::<String> {
+            filters: std::collections::HashMap::new(),
+        })
+    ).await?;
+
+    let mut removed_networks = 0;
+
+    for network in networks {
+        let name = network.name.unwrap_or_default();
+        if name.starts_with("rehearsa_stack_") {
+            print!("Removing network {} ... ", name);
+            match docker.remove_network(&name).await {
+                Ok(_) => { println!("✓"); removed_networks += 1; }
+                Err(e) => println!("✗ ({})", e),
+            }
+        }
+    }
+
+    if removed_containers == 0 && removed_networks == 0 {
+        println!("No orphaned rehearsal resources found.");
+    } else {
+        println!();
+        println!("Cleaned up {} container(s), {} network(s).", removed_containers, removed_networks);
+    }
+
+    Ok(())
 }

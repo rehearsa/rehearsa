@@ -12,12 +12,15 @@ use crate::docker::compose::ComposeFile;
 // ======================================================
 
 pub struct PreflightContext<'a> {
-    pub compose:     &'a ComposeFile,
-    pub docker:      &'a Docker,
+    pub compose:      &'a ComposeFile,
+    pub docker:       &'a Docker,
+    /// Raw Compose file content — used by rules that need top-level blocks
+    /// not captured in the parsed service model (e.g. networks).
+    pub compose_raw:  String,
     /// Snapshot of the host environment at rehearsal time.
     /// Used by EnvVarRule to detect variables referenced in compose
     /// but absent from the restore host.
-    pub environment: HashMap<String, String>,
+    pub environment:  HashMap<String, String>,
 }
 
 // ======================================================
@@ -270,6 +273,82 @@ impl PreflightRule for EnvVarRule {
 }
 
 // ======================================================
+// RULE 4: External Network Validation
+// ======================================================
+//
+// Stacks that declare external networks require those networks
+// to exist on the restore host before the stack can start.
+// This rule detects missing external networks and flags them
+// as Critical — the stack will not start without them.
+
+pub struct ExternalNetworkRule;
+
+#[async_trait]
+impl PreflightRule for ExternalNetworkRule {
+
+    fn name(&self) -> &'static str { "ExternalNetworkRule" }
+
+    async fn evaluate(
+        &self,
+        ctx: &PreflightContext<'_>,
+    ) -> Vec<PreflightFinding> {
+
+        use crate::docker::compose::extract_external_networks;
+        use bollard::network::ListNetworksOptions;
+        use std::collections::HashMap as HM;
+
+        let mut findings = Vec::new();
+
+        let external = extract_external_networks(&ctx.compose_raw);
+        if external.is_empty() {
+            return findings;
+        }
+
+        // Fetch existing Docker networks
+        let opts: ListNetworksOptions<String> = ListNetworksOptions {
+            filters: HM::new(),
+        };
+
+        let existing: std::collections::HashSet<String> = match ctx.docker.list_networks(Some(opts)).await {
+            Ok(networks) => networks
+                .into_iter()
+                .filter_map(|n| n.name)
+                .collect(),
+            Err(_) => {
+                // Cannot reach Docker — skip rule rather than false-flag
+                return findings;
+            }
+        };
+
+        for network in external {
+            if !existing.contains(&network) {
+                findings.push(PreflightFinding {
+                    rule:     self.name(),
+                    severity: Severity::Critical,
+                    message:  format!(
+                        "External network '{}' does not exist on this host — stack will fail to start on restore",
+                        network
+                    ),
+                    penalty: 25,
+                });
+            } else {
+                findings.push(PreflightFinding {
+                    rule:     self.name(),
+                    severity: Severity::Info,
+                    message:  format!(
+                        "External network '{}' exists — must also be created before restore on any other host",
+                        network
+                    ),
+                    penalty: 0,
+                });
+            }
+        }
+
+        findings
+    }
+}
+
+// ======================================================
 // RULE ENGINE
 // ======================================================
 
@@ -281,6 +360,7 @@ pub async fn run_preflight(
         Box::new(BindMountRule),
         Box::new(ImagePullRule),
         Box::new(EnvVarRule),
+        Box::new(ExternalNetworkRule),
     ];
 
     let mut findings = Vec::new();

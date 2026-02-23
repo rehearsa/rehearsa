@@ -20,6 +20,7 @@ pub struct Service {
     pub healthcheck: Option<HealthCheck>,
     pub ports: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ pub fn parse_compose(content: &str) -> Result<ComposeFile, String> {
             entrypoint: extract_string_or_list(svc_map, "entrypoint"),
             healthcheck: extract_healthcheck(svc_map),
             ports: extract_ports(svc_map),
+            labels: extract_labels(svc_map),
         };
 
         services.insert(name, service);
@@ -238,6 +240,47 @@ fn extract_ports(map: &serde_yaml::Mapping) -> Option<Vec<String>> {
 }
 
 // ======================================================
+// LABELS EXTRACTOR
+// ======================================================
+
+/// Extract labels block.
+/// Handles:
+///   - Map form: {com.rehearsa.oneshot: "true"}
+///   - Sequence form: ["com.rehearsa.oneshot=true"]
+fn extract_labels(map: &serde_yaml::Mapping) -> Option<std::collections::HashMap<String, String>> {
+    match map.get("labels") {
+        None | Some(serde_yaml::Value::Null) => None,
+
+        Some(serde_yaml::Value::Mapping(m)) => {
+            let mut out = std::collections::HashMap::new();
+            for (k, v) in m {
+                if let Some(key) = k.as_str() {
+                    let val = value_to_string(v).unwrap_or_default();
+                    out.insert(key.to_string(), val);
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let mut out = std::collections::HashMap::new();
+            for v in seq {
+                if let Some(s) = v.as_str() {
+                    if let Some((k, val)) = s.split_once('=') {
+                        out.insert(k.to_string(), val.to_string());
+                    } else {
+                        out.insert(s.to_string(), "true".to_string());
+                    }
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+
+        _ => None,
+    }
+}
+
+// ======================================================
 // HELPERS
 // ======================================================
 
@@ -248,4 +291,46 @@ fn value_to_string(v: &serde_yaml::Value) -> Option<String> {
         serde_yaml::Value::Bool(b)   => Some(b.to_string()),
         _ => None,
     }
+}
+
+// ======================================================
+// NETWORK EXTRACTION (top-level)
+// ======================================================
+
+/// Extract top-level external network names from the Compose file.
+/// Returns names of networks declared as external: true.
+pub fn extract_external_networks(content: &str) -> Vec<String> {
+    let root: serde_yaml::Value = match serde_yaml::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let networks = match root.get("networks") {
+        Some(serde_yaml::Value::Mapping(m)) => m,
+        _ => return vec![],
+    };
+
+    let mut external = Vec::new();
+
+    for (key, value) in networks {
+        let name = match key.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        // external: true or external: {name: ...}
+        let is_external = match value {
+            serde_yaml::Value::Mapping(m) => {
+                matches!(m.get("external"), Some(serde_yaml::Value::Bool(true)))
+                || m.get("external").and_then(|v| {
+                    if let serde_yaml::Value::Mapping(_) = v { Some(true) } else { None }
+                }).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if is_external {
+            external.push(name.to_string());
+        }
+    }
+
+    external
 }
