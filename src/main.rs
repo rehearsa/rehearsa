@@ -8,6 +8,7 @@ mod daemon;
 mod provider;
 mod notify;
 mod report;
+mod coverage;
 
 use clap::{Parser, Subcommand};
 use chrono;
@@ -84,6 +85,12 @@ enum Commands {
         command: NotifyCommands,
     },
     Status,
+    /// Show fleet-wide restore contract coverage across all watched stacks.
+    Coverage {
+        /// Output raw JSON instead of the formatted table.
+        #[arg(long)]
+        json: bool,
+    },
     Version,
     /// Remove orphaned containers and networks left by crashed rehearsals.
     Cleanup,
@@ -484,6 +491,7 @@ async fn main() {
 
                 if let Some(latest) = history::load_latest(&stack_name) {
                     let baseline = StackBaseline {
+                        schema_version: history::CURRENT_SCHEMA_VERSION,
                         stack: stack_name.clone(),
                         expected_services: latest.services.keys().cloned().collect(),
                         expected_confidence: latest.confidence,
@@ -703,6 +711,7 @@ async fn main() {
                             // Pin whatever came back as the initial baseline
                             if let Some(latest) = history::load_latest(&watch.stack) {
                                 let b = baseline::StackBaseline {
+                                    schema_version: history::CURRENT_SCHEMA_VERSION,
                                     stack: watch.stack.clone(),
                                     expected_services: latest.services.keys().cloned().collect(),
                                     expected_confidence: latest.confidence,
@@ -953,6 +962,32 @@ async fn main() {
             if let Err(e) = history::status_all() {
                 eprintln!("Status error: {}", e);
                 exit(1);
+            }
+        }
+
+        // ==================================================
+        // COVERAGE
+        // ==================================================
+
+        Commands::Coverage { json } => {
+            match coverage::build_coverage() {
+                Ok(summary) => {
+                    if json {
+                        if let Err(e) = coverage::print_coverage_json(&summary) {
+                            eprintln!("Coverage error: {}", e);
+                            exit(1);
+                        }
+                    } else {
+                        coverage::print_coverage(&summary);
+                        if summary.coverage_pct < 100 {
+                            exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Coverage error: {}", e);
+                    exit(1);
+                }
             }
         }
 

@@ -24,6 +24,7 @@ use crate::engine::preflight::{PreflightContext, run_preflight, Severity};
 use crate::lock::StackLock;
 use crate::history::{
     RunRecord,
+    CURRENT_SCHEMA_VERSION,
     persist,
     now_timestamp,
     validate_stack_integrity,
@@ -513,6 +514,7 @@ let summary = StackRunSummary {
 };
 
 let record = RunRecord {
+    schema_version: CURRENT_SCHEMA_VERSION,
     stack: stack_name,
     timestamp: now_timestamp(),
     duration_seconds: duration,

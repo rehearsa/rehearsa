@@ -3,12 +3,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::history::CURRENT_SCHEMA_VERSION;
+
 // ======================================================
 // DATA STRUCTURES
 // ======================================================
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StackBaseline {
+    /// Schema version. 0 = pre-1.0 baseline (no version field on disk).
+    #[serde(default)]
+    pub schema_version: u32,
     pub stack: String,
 
     pub expected_services: Vec<String>,
@@ -230,6 +235,7 @@ pub fn promote_baseline(stack: &str, timestamp: Option<&str>) -> Result<(), Stri
     let now = chrono::Utc::now().to_rfc3339();
 
     let baseline = StackBaseline {
+        schema_version:      CURRENT_SCHEMA_VERSION,
         stack:               stack.to_string(),
         expected_services:   record.services.keys().cloned().collect(),
         expected_confidence: record.confidence,

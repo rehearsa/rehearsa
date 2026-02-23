@@ -8,11 +8,22 @@ use colored::*;
 use colored::control;
 
 // ======================================================
+// SCHEMA VERSION
+// ======================================================
+
+/// Increment this when a breaking change is made to RunRecord or StackBaseline.
+/// Records written before schema versioning was introduced deserialise as version 0.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+// ======================================================
 // DATA STRUCTURE
 // ======================================================
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunRecord {
+    /// Schema version. 0 = pre-1.0 record (no version field on disk).
+    #[serde(default)]
+    pub schema_version: u32,
     pub stack: String,
     pub timestamp: String,
     pub duration_seconds: u64,
@@ -31,6 +42,9 @@ pub struct RunRecord {
 fn compute_hash(record: &RunRecord) -> Result<String, String> {
     let mut temp = record.clone();
     temp.hash = None;
+    // schema_version is metadata, not content — exclude from hash so that
+    // a version-field-only change does not invalidate existing records.
+    temp.schema_version = 0;
 
     let json = serde_json::to_string(&temp)
         .map_err(|e| format!("Hash serialization error: {}", e))?;
@@ -102,6 +116,7 @@ pub fn persist(record: &RunRecord) -> Result<(), String> {
     let file_path = stack_dir.join(filename);
 
     let mut record_with_hash = record.clone();
+    record_with_hash.schema_version = CURRENT_SCHEMA_VERSION;
     let hash = compute_hash(&record_with_hash)?;
     record_with_hash.hash = Some(hash);
 

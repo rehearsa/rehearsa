@@ -4,6 +4,35 @@ All notable changes to Rehearsa are documented here.
 
 ---
 
+## [0.9.1] — Coverage + Schema Hardening
+
+The final release before 1.0.
+
+0.9.1 closes the feature story with one new command and hardens the on-disk schema in preparation for the 1.0 stability guarantee. After this release, the CLI surface is declared stable — no breaking changes will be made without a major version increment.
+
+### Added
+
+**Restore Contract Coverage**
+- `rehearsa coverage` — fleet-wide contract coverage across all watched stacks
+- Coverage bar, per-stack status table, and rollup counters in a single command
+- Five status states: `CONTRACT HONOURED`, `DRIFT DETECTED`, `NO_BASELINE`, `NO_RUNS`, `UNWATCHED`
+- Exits 0 only when all watched stacks are honouring their contracts — usable as a CI gate
+- `--json` flag for machine-readable output and pipeline integration
+- Pure on-disk read — no Docker calls required
+
+**Schema Versioning**
+- `schema_version` field added to `RunRecord` and `StackBaseline`
+- `CURRENT_SCHEMA_VERSION = 1` — the single source of truth for the on-disk format
+- Pre-1.0 records on disk deserialise cleanly as version 0 — no migration required
+- Hash computation excludes `schema_version` — existing tamper-evident records remain valid
+- All record construction sites stamp the current version — every new record is versioned from this release forward
+- Breaking schema changes after 1.0 will be detectable on load
+
+### Philosophy
+> "Prove recoverability. Know your coverage. Ship with confidence."
+
+---
+
 ## [0.9.0] — Full Compatibility + Contract Hardening
 
 Rehearsa now works against real infrastructure, not just ideal infrastructure.

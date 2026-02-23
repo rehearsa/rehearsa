@@ -34,6 +34,9 @@ rehearsa baseline set /path/to/docker-compose.yml
 # First deployment — rehearse and pin all watched stacks at once
 rehearsa baseline auto-init
 
+# Show fleet-wide contract coverage
+rehearsa coverage
+
 # Generate a compliance report
 rehearsa report --stack mystack --format pdf
 
@@ -238,6 +241,34 @@ rehearsa report --stack mystack --format both --output ./reports/
 JSON and PDF output. The PDF includes a verdict banner (PASS / WARN / FAIL), service score bars, history trend, baseline contract status, preflight findings, and a unique tamper-evident report ID. Single-stack or fleet-wide.
 
 ---
+
+## Contract Coverage
+
+See at a glance how much of your watched fleet is under active contract:
+
+```bash
+rehearsa coverage
+```
+
+```
+Restore Contract Coverage
+────────────────────────────────────────────────────────────
+Coverage  [████████████████████]  100%
+
+  5  watched
+  5  with baseline contract
+  5  honouring contract  ✓
+
+Stack                  Status               Confidence  Readiness
+──────────────────────────────────────────────────────────────────
+immich                 ✓  CONTRACT HONOURED        94%        88%
+paperless              ✓  CONTRACT HONOURED        91%       100%
+```
+
+`rehearsa coverage` exits 0 only when all contracts are honoured — making it usable as a CI gate. Use `--json` for machine-readable output.
+
+---
+
 
 ## Tamper-Evident History
 
