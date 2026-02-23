@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            binary_name: rehearsa-x86_64
+
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            binary_name: rehearsa-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/rehearsa ${{ matrix.binary_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rehearsa-x86_64
+            rehearsa-aarch64
+          generate_release_notes: false
+          body: |
+            ## Installation
+
+            **x86_64 (most servers and desktops)**
+            ```bash
+            curl -L https://github.com/rehearsa/rehearsa/releases/latest/download/rehearsa-x86_64 -o rehearsa
+            chmod +x rehearsa
+            sudo mv rehearsa /usr/local/bin/
+            ```
+
+            **aarch64 (Raspberry Pi, ARM servers)**
+            ```bash
+            curl -L https://github.com/rehearsa/rehearsa/releases/latest/download/rehearsa-aarch64 -o rehearsa
+            chmod +x rehearsa
+            sudo mv rehearsa /usr/local/bin/
+            ```
+
+            See [CHANGELOG.md](https://github.com/rehearsa/rehearsa/blob/main/CHANGELOG.md) for what's in this release.
