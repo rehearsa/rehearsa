@@ -905,6 +905,12 @@ async fn main() {
                     _          => notify::EmailProvider::Smtp,
                 };
 
+                if smtp_password.is_some() {
+                    eprintln!("⚠  Warning: storing literal SMTP password on disk. Use --smtp-password-env in production.");
+                }
+                if sendgrid_api_key.is_some() {
+                    eprintln!("⚠  Warning: storing literal Sendgrid API key on disk. Use --sendgrid-api-key-env in production.");
+                }
                 if let Err(e) = notify::add_email_channel(
                     &name,
                     email_provider,

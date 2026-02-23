@@ -37,7 +37,13 @@ pub fn save_config(config: &DaemonConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
     fs::write(CONFIG_PATH, json)
         .map_err(|e| format!("Failed to write config: {}
-Try running with sudo.", e))
+Try running with sudo.", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(CONFIG_PATH, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Resolve the concurrency limit using three-tier precedence:
@@ -180,7 +186,15 @@ pub fn save_registry(registry: &WatchRegistry) -> Result<(), String> {
     let json = serde_json::to_string_pretty(registry)
         .map_err(|e| format!("Failed to serialize watches: {}", e))?;
     fs::write(path, json)
-        .map_err(|e| format!("Failed to write watches: {}\nTry running with sudo.", e))
+        .map_err(|e| format!("Failed to write watches: {}\nTry running with sudo.", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(p) = watches_path() {
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(())
 }
 
 pub fn add_watch(
@@ -498,6 +512,12 @@ fn save_scheduler_state(last_run: &HashMap<String, chrono::DateTime<Utc>>) {
     };
     if let Err(e) = fs::write(SCHEDULER_STATE_PATH, raw) {
         eprintln!("Scheduler: failed to write state to {}: {}", SCHEDULER_STATE_PATH, e);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(SCHEDULER_STATE_PATH, std::fs::Permissions::from_mode(0o600));
     }
 }
 
