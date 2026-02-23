@@ -1,0 +1,27 @@
+services:
+  rehearsa:
+    image: ghcr.io/rehearsa/rehearsa:latest
+    container_name: rehearsa
+    restart: unless-stopped
+
+    volumes:
+      # Docker socket — required for running rehearsals
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Rehearsa config and watch registry
+      - /etc/rehearsa:/etc/rehearsa
+
+      # Run history, baselines, and notifications
+      - /root/.rehearsa:/root/.rehearsa
+
+      # Mount your Compose files so Rehearsa can read them
+      # Add one entry per stack you want to watch, e.g:
+      # - /home/user/stacks:/stacks:ro
+
+    environment:
+      # Optional: increase concurrent rehearsals on capable hardware (default: 1)
+      # - REHEARSA_MAX_CONCURRENT=2
+      - RUST_LOG=info
+
+    # Required: run as root to access the Docker socket and /etc/rehearsa
+    user: root
