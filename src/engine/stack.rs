@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use crate::docker::compose::{ComposeFile, HealthCheck};
 use crate::engine::graph::topological_sort;
+use crate::engine::preflight::{PreflightContext, run_preflight, Severity};
 use crate::lock::StackLock;
 use crate::history::{
     RunRecord,
@@ -30,7 +31,7 @@ use crate::history::{
     analyze_regression,
 };
 use crate::policy::load_policy;
-
+use crate::baseline::{load_baseline, compare_to_baseline};
 // ======================================================
 // PULL POLICY
 // ======================================================
@@ -40,6 +41,20 @@ pub enum PullPolicy {
     Always,
     IfMissing,
     Never,
+}
+
+// ======================================================
+// RUN SUMMARY (NEW)
+// ======================================================
+
+#[derive(Debug, Clone)]
+pub struct StackRunSummary {
+    pub stack: String,
+    pub readiness: u32,
+    pub confidence: u32,
+    pub duration: u64,
+    pub risk: String,
+    pub service_scores: HashMap<String, u32>,
 }
 
 // ======================================================
@@ -53,7 +68,7 @@ pub async fn test_stack(
     inject_failure: Option<String>,
     strict_integrity: bool,
     pull_policy: PullPolicy,
-) -> Result<()> {
+) -> Result<StackRunSummary> {
 
     let compose_path = Path::new(path);
     let stack_name = compose_path
@@ -76,6 +91,37 @@ pub async fn test_stack(
     let content = fs::read_to_string(path)?;
     let compose: ComposeFile = serde_yaml::from_str(&content)?;
 
+    // ======================================================
+    // PREFLIGHT
+    // ======================================================
+
+    let env_map: HashMap<String, String> = std::env::vars().collect();
+
+    let preflight_ctx = PreflightContext {
+        compose: &compose,
+        docker: &docker,
+        environment: env_map,
+    };
+
+    let readiness = run_preflight(&preflight_ctx).await;
+
+    if !json_output {
+        println!();
+        println!("Preflight: Fresh Host Readiness");
+        println!("--------------------------------");
+
+        for finding in &readiness.findings {
+            match finding.severity {
+                Severity::Critical => println!("❌ {}", finding.message),
+                Severity::Warning => println!("⚠ {}", finding.message),
+                Severity::Info => println!("ℹ {}", finding.message),
+            }
+        }
+
+        println!("Restore Readiness Score: {}%", readiness.score);
+        println!();
+    }
+
     if !json_output {
         println!(
             "Starting restore simulation for '{}' ({} services)...",
@@ -93,6 +139,7 @@ pub async fn test_stack(
     let execution = async {
 
         let mut dep_map: HashMap<String, Vec<String>> = HashMap::new();
+
         for (name, service) in &compose.services {
             dep_map.insert(
                 name.clone(),
@@ -140,6 +187,7 @@ pub async fn test_stack(
                 format!("rehearsa_{}_{}", run_id, service_name);
 
             let mut endpoints: HashMap<String, EndpointSettings> = HashMap::new();
+
             endpoints.insert(
                 network_name.clone(),
                 EndpointSettings {
@@ -209,9 +257,12 @@ pub async fn test_stack(
 
     let _ = docker.remove_network(&network_name).await;
 
-    if execution.is_err() {
-        return execution;
-    }
+    if let Err(e) = execution {
+    return Err(e);
+}
+    // ======================================================
+    // SCORING
+    // ======================================================
 
     let total: u32 = service_scores.values().sum();
     let confidence = total / service_scores.len() as u32;
@@ -224,67 +275,188 @@ pub async fn test_stack(
     };
 
     let duration = start_time.elapsed().as_secs();
-    let regression = analyze_regression(&stack_name, confidence, duration);
+
+    let regression = analyze_regression(
+        &stack_name,
+        confidence,
+        Some(readiness.score),
+        duration,
+    );
+
     let stability = calculate_stability(&stack_name, 5);
+// ======================================================
+// BASELINE DRIFT DETECTION
+// ======================================================
 
-    let mut policy_violation = false;
+let mut baseline_drift_detected = false;
 
-    if let Some(policy) = load_policy(&stack_name) {
+if let Some(baseline) = load_baseline(&stack_name) {
 
-        if let Some(min) = policy.min_confidence {
-            if confidence < min {
+    let drift = compare_to_baseline(
+        &baseline,
+        &service_scores,
+        confidence,
+        Some(readiness.score),
+        duration,
+    );
+
+    let has_drift =
+        !drift.new_services.is_empty()
+        || !drift.missing_services.is_empty()
+        || drift.confidence_delta != 0
+        || drift.readiness_delta.unwrap_or(0) != 0
+        || drift.duration_delta_percent.unwrap_or(0) != 0;
+
+    if has_drift {
+        baseline_drift_detected = true;
+    }
+
+    if has_drift && !json_output {
+
+        println!();
+        println!("BASELINE DRIFT DETECTED");
+        println!("-----------------------");
+
+        for svc in drift.new_services {
+            println!("+ New service: {}", svc);
+        }
+
+        for svc in drift.missing_services {
+            println!("- Missing service: {}", svc);
+        }
+
+        if drift.confidence_delta != 0 {
+            println!("Confidence delta: {}%", drift.confidence_delta);
+        }
+
+        if let Some(r) = drift.readiness_delta {
+            if r != 0 {
+                println!("Readiness delta: {}%", r);
+            }
+        }
+
+        if let Some(d) = drift.duration_delta_percent {
+            if d != 0 {
+                println!("Duration delta: {}%", d);
+            }
+        }
+
+        println!();
+    }
+}
+// ======================================================
+// POLICY ENFORCEMENT
+// ======================================================
+
+let mut policy_violation = false;
+
+if let Some(policy) = load_policy(&stack_name) {
+
+    if let Some(min) = policy.min_confidence {
+        if confidence < min {
+            eprintln!(
+                "POLICY VIOLATION: confidence {} below minimum {}",
+                confidence, min
+            );
+            policy_violation = true;
+        }
+    }
+
+    if let Some(min_ready) = policy.min_readiness {
+        if readiness.score < min_ready {
+            eprintln!(
+                "POLICY VIOLATION: restore readiness {} below minimum {}",
+                readiness.score, min_ready
+            );
+            policy_violation = true;
+        }
+    }
+
+    if policy.block_on_regression.unwrap_or(false) {
+        if let Some(delta) = regression.confidence_delta {
+            if delta < 0 {
+                eprintln!("POLICY VIOLATION: regression detected");
+                policy_violation = true;
+            }
+        }
+    }
+
+    if policy.fail_on_new_service_failure.unwrap_or(false) {
+        for (service, score) in &service_scores {
+            if *score == 0 {
                 eprintln!(
-                    "POLICY VIOLATION: confidence {} below minimum {}",
-                    confidence, min
+                    "POLICY VIOLATION: service '{}' failed to boot",
+                    service
                 );
                 policy_violation = true;
             }
         }
+    }
 
-        if policy.block_on_regression.unwrap_or(false) {
-            if let Some(delta) = regression.delta {
-                if delta < 0 {
-                    eprintln!("POLICY VIOLATION: regression detected");
-                    policy_violation = true;
-                }
+    if policy.fail_on_duration_spike.unwrap_or(false) {
+        if let Some(spike) = regression.duration_delta_percent {
+            if spike > policy.duration_spike_percent.unwrap_or(50) as i32 {
+                eprintln!(
+                    "POLICY VIOLATION: duration spike {}%",
+                    spike
+                );
+                policy_violation = true;
             }
         }
     }
 
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "stack": stack_name,
-            "confidence": confidence,
-            "previous_confidence": regression.previous_confidence,
-            "delta": regression.delta,
-            "trend": regression.trend,
-            "stability": stability,
-            "risk": risk,
-            "services": service_scores
-        }))?);
-    } else {
-        println!();
-        println!("Rehearsa Simulation Complete");
-        println!("────────────────────────────────────────");
-        println!("Stack: {}", stack_name);
-        println!("Services: {}", service_scores.len());
-        println!("Confidence: {}% ({})", confidence, risk);
-        println!("Stability: {}%", stability);
-        println!("Duration: {}s", duration);
-
-        if let Some(trend) = regression.trend {
-            println!("Trend: {}", trend);
+    // --------------------------------------------------
+    // Baseline Drift Enforcement (NEW)
+    // --------------------------------------------------
+    if policy.fail_on_baseline_drift.unwrap_or(false) {
+        if baseline_drift_detected {
+            eprintln!("POLICY VIOLATION: baseline drift detected");
+            policy_violation = true;
         }
-
-        if policy_violation {
-            println!("⚠ POLICY VIOLATION DETECTED");
-        }
-
-        println!();
     }
+}
 
-    let exit_code = if policy_violation {
+// ======================================================
+// JSON OUTPUT
+// ======================================================
+
+if json_output {
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "stack": stack_name,
+        "restore_readiness": readiness.score,
+        "confidence": confidence,
+
+        "previous_confidence": regression.previous_confidence,
+        "confidence_delta": regression.confidence_delta,
+        "confidence_trend": regression.confidence_trend,
+
+        "previous_readiness": regression.previous_readiness,
+        "readiness_delta": regression.readiness_delta,
+        "readiness_trend": regression.readiness_trend,
+
+        "duration_delta_percent": regression.duration_delta_percent,
+
+        "baseline_drift_detected": baseline_drift_detected,
+
+        "stability": stability,
+        "risk": risk,
+        "services": service_scores
+    }))?);
+}
+
+// ======================================================
+// EXIT LOGIC
+// ======================================================
+
+let exit_code =
+    if policy_violation {
         4
+    } else if baseline_drift_detected
+        && load_policy(&stack_name)
+            .and_then(|p| p.fail_on_baseline_drift)
+            .unwrap_or(false)
+    {
+        5
     } else if confidence >= 70 {
         0
     } else if confidence >= 40 {
@@ -293,24 +465,35 @@ pub async fn test_stack(
         3
     };
 
-    let record = RunRecord {
-        stack: stack_name,
-        timestamp: now_timestamp(),
-        duration_seconds: duration,
-        confidence,
-        risk: risk.to_string(),
-        exit_code,
-        services: service_scores,
-        hash: None,
-    };
+// Create summary BEFORE moving values
+let summary = StackRunSummary {
+    stack: stack_name.clone(),
+    readiness: readiness.score,
+    confidence,
+    duration,
+    risk: risk.to_string(),
+    service_scores: service_scores.clone(),
+};
 
-    let _ = persist(&record);
+let record = RunRecord {
+    stack: stack_name,
+    timestamp: now_timestamp(),
+    duration_seconds: duration,
+    confidence,
+    readiness: Some(readiness.score),
+    risk: risk.to_string(),
+    exit_code,
+    services: service_scores,
+    hash: None,
+};
 
-    if exit_code == 0 {
-        Ok(())
-    } else {
-        std::process::exit(exit_code);
-    }
+let _ = persist(&record);
+
+if exit_code != 0 {
+    std::process::exit(exit_code);
+}
+
+Ok(summary)
 }
 // ======================================================
 // IMAGE PULL
@@ -331,7 +514,7 @@ async fn pull_image(docker: &Docker, image: &str) -> Result<()> {
 }
 
 // ======================================================
-// HEALTHCHECK CONVERSION
+// HEALTHCHECK
 // ======================================================
 
 fn convert_healthcheck(h: &HealthCheck) -> HealthConfig {
@@ -373,11 +556,9 @@ async fn wait_and_score(
         let inspect = docker.inspect_container(container, None).await?;
 
         if let Some(state) = inspect.state {
-
             match state.status {
 
                 Some(ContainerStateStatusEnum::RUNNING) => {
-
                     if let Some(health) = state.health {
                         match health.status {
                             Some(HealthStatusEnum::HEALTHY) => return Ok(100),

@@ -9,14 +9,18 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StackPolicy {
     pub min_confidence: Option<u32>,
+
+    // NEW: Restore readiness enforcement
+    pub min_readiness: Option<u32>,
+
     pub block_on_regression: Option<bool>,
     pub fail_on_new_service_failure: Option<bool>,
 
-    // NEW: Duration-based enforcement
+    // Duration-based enforcement
     pub fail_on_duration_spike: Option<bool>,
     pub duration_spike_percent: Option<u32>,
+    pub fail_on_baseline_drift: Option<bool>,
 }
-
 // ======================================================
 // INTERNAL PATH HELPERS
 // ======================================================

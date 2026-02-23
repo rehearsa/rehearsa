@@ -16,6 +16,7 @@ pub struct RunRecord {
     pub stack: String,
     pub timestamp: String,
     pub duration_seconds: u64,
+    pub readiness: Option<u32>,
     pub confidence: u32,
     pub risk: String,
     pub exit_code: i32,
@@ -45,6 +46,7 @@ fn compute_hash(record: &RunRecord) -> Result<String, String> {
 // ======================================================
 
 pub fn validate_stack_integrity(stack: &str) -> Result<(), String> {
+
     let home = dirs::home_dir()
         .ok_or("Could not determine home directory")?;
 
@@ -87,6 +89,7 @@ pub fn validate_stack_integrity(stack: &str) -> Result<(), String> {
 // ======================================================
 
 pub fn persist(record: &RunRecord) -> Result<(), String> {
+
     let home = dirs::home_dir()
         .ok_or("Could not determine home directory")?;
 
@@ -124,6 +127,7 @@ pub fn now_timestamp() -> String {
 // ======================================================
 
 pub fn load_latest(stack: &str) -> Option<RunRecord> {
+
     let home = dirs::home_dir()?;
     let stack_dir = home.join(".rehearsa").join("history").join(stack);
 
@@ -136,6 +140,7 @@ pub fn load_latest(stack: &str) -> Option<RunRecord> {
 
     let latest = entries.last()?;
     let content = fs::read_to_string(latest).ok()?;
+
     serde_json::from_str(&content).ok()
 }
 
@@ -144,6 +149,7 @@ pub fn load_latest(stack: &str) -> Option<RunRecord> {
 // ======================================================
 
 pub fn calculate_stability(stack: &str, window: usize) -> u32 {
+
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return 100,
@@ -178,11 +184,13 @@ pub fn calculate_stability(stack: &str, window: usize) -> u32 {
 
     if count == 0 { 100 } else { total / count }
 }
+
 // ======================================================
 // LIST STACKS
 // ======================================================
 
 pub fn list_stacks() -> Result<(), String> {
+
     let home = dirs::home_dir()
         .ok_or("Could not determine home directory")?;
 
@@ -212,6 +220,7 @@ pub fn list_stacks() -> Result<(), String> {
 // ======================================================
 
 pub fn show_stack(stack: &str) -> Result<(), String> {
+
     let home = dirs::home_dir()
         .ok_or("Could not determine home directory")?;
 
@@ -232,6 +241,7 @@ pub fn show_stack(stack: &str) -> Result<(), String> {
     println!("Stack: {}\n", stack);
 
     for path in entries {
+
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
@@ -239,8 +249,9 @@ pub fn show_stack(stack: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to parse history file: {}", e))?;
 
         println!(
-            "{} | Confidence: {}% | Risk: {} | Duration: {}s | Exit: {}",
+            "{} | Readiness: {}% | Confidence: {}% | Risk: {} | Duration: {}s | Exit: {}",
             record.timestamp,
+            record.readiness.unwrap_or(0),
             record.confidence,
             record.risk,
             record.duration_seconds,
@@ -250,11 +261,13 @@ pub fn show_stack(stack: &str) -> Result<(), String> {
 
     Ok(())
 }
+
 // ======================================================
 // STATUS
 // ======================================================
 
 pub fn status_all() -> Result<(), String> {
+
     control::set_override(true);
 
     let home = dirs::home_dir()
@@ -269,15 +282,15 @@ pub fn status_all() -> Result<(), String> {
 
     println!();
     println!("{}", "Rehearsa Status".bold());
-    println!("{}", "────────────────────────────────────────────────────────".dimmed());
+    println!("{}", "────────────────────────────────────────────────────────────────────".dimmed());
     println!();
 
     println!(
-        "{:<20} {:<12} {:<12} {:<12} {:<6}",
-        "Stack", "Confidence", "Risk", "Stability", "Trend"
+        "{:<20} {:<12} {:<12} {:<12} {:<12} {:<6}",
+        "Stack", "Readiness", "Confidence", "Risk", "Stability", "Trend"
     );
 
-    println!("{}", "────────────────────────────────────────────────────────".dimmed());
+    println!("{}", "────────────────────────────────────────────────────────────────────".dimmed());
 
     let mut stacks: Vec<PathBuf> = fs::read_dir(&history_dir)
         .map_err(|e| format!("Failed to read history dir: {}", e))?
@@ -288,6 +301,7 @@ pub fn status_all() -> Result<(), String> {
     stacks.sort();
 
     for stack_path in stacks {
+
         let stack_name = stack_path
             .file_name()
             .unwrap()
@@ -297,25 +311,46 @@ pub fn status_all() -> Result<(), String> {
         if let Some(latest) = load_latest(&stack_name) {
 
             let stability = calculate_stability(&stack_name, 5);
+
             let analysis = analyze_regression(
                 &stack_name,
                 latest.confidence,
+                latest.readiness,
                 latest.duration_seconds,
             );
 
-            // Pre-pad raw values
+            let readiness_value = latest.readiness.unwrap_or(0);
+
             let stack_col = format!("{:<20}", stack_name);
+            let readiness_raw = format!("{:<12}", format!("{}%", readiness_value));
             let confidence_raw = format!("{:<12}", format!("{}%", latest.confidence));
             let risk_raw = format!("{:<12}", latest.risk);
             let stability_col = format!("{:<12}", format!("{}%", stability));
-            let trend_raw = format!("{:<6}", match analysis.trend.as_deref() {
-                Some("UP") => "↑",
-                Some("DOWN") => "↓",
-                Some("SAME") => "→",
-                _ => "-",
-            });
 
-            // Apply color AFTER padding
+            let confidence_arrow = match analysis.confidence_trend.as_deref() {
+    Some("UP") => "↑",
+    Some("DOWN") => "↓",
+    Some("SAME") => "→",
+    _ => "-",
+};
+
+let readiness_arrow = match analysis.readiness_trend.as_deref() {
+    Some("UP") => "↑",
+    Some("DOWN") => "↓",
+    Some("SAME") => "→",
+    _ => "-",
+};
+
+let trend_combined = format!("C:{} R:{}", confidence_arrow, readiness_arrow);
+let trend_raw = format!("{:<6}", trend_combined);
+
+            let readiness_col = match readiness_value {
+                90..=100 => readiness_raw.green(),
+                70..=89 => readiness_raw.yellow(),
+                40..=69 => readiness_raw.bright_red(),
+                _ => readiness_raw.red(),
+            };
+
             let confidence_col = match latest.confidence {
                 90..=100 => confidence_raw.green(),
                 70..=89 => confidence_raw.yellow(),
@@ -331,16 +366,17 @@ pub fn status_all() -> Result<(), String> {
                 _ => risk_raw.normal(),
             };
 
-            let trend_col = match analysis.trend.as_deref() {
-                Some("UP") => trend_raw.green(),
-                Some("DOWN") => trend_raw.red(),
-                Some("SAME") => trend_raw.yellow(),
-                _ => trend_raw.normal(),
-            };
+            let trend_col = match analysis.confidence_trend.as_deref() {
+    Some("UP") => trend_raw.green(),
+    Some("DOWN") => trend_raw.red(),
+    Some("SAME") => trend_raw.yellow(),
+    _ => trend_raw.normal(),
+};
 
             println!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 stack_col,
+                readiness_col,
                 confidence_col,
                 risk_col,
                 stability_col,
@@ -360,14 +396,18 @@ pub fn status_all() -> Result<(), String> {
 #[derive(Debug)]
 pub struct RegressionAnalysis {
     pub previous_confidence: Option<u32>,
-    pub delta: Option<i32>,
-    pub trend: Option<String>,
+    pub confidence_delta: Option<i32>,
+    pub confidence_trend: Option<String>,
+    pub previous_readiness: Option<u32>,
+    pub readiness_delta: Option<i32>,
+    pub readiness_trend: Option<String>,
     pub duration_delta_percent: Option<i32>,
 }
 
 pub fn analyze_regression(
     stack: &str,
     current_confidence: u32,
+    current_readiness: Option<u32>,
     current_duration: u64,
 ) -> RegressionAnalysis {
 
@@ -375,27 +415,50 @@ pub fn analyze_regression(
 
     if let Some(prev) = previous {
 
-        let delta = current_confidence as i32 - prev.confidence as i32;
+        let confidence_delta =
+            current_confidence as i32 - prev.confidence as i32;
 
-        let trend = if delta > 0 {
+        let confidence_trend = if confidence_delta > 0 {
             "UP"
-        } else if delta < 0 {
+        } else if confidence_delta < 0 {
             "DOWN"
         } else {
             "SAME"
         };
 
-        let duration_delta_percent = if prev.duration_seconds > 0 {
-            let diff = current_duration as i64 - prev.duration_seconds as i64;
-            Some(((diff * 100) / prev.duration_seconds as i64) as i32)
-        } else {
-            None
+        let readiness_delta = match (current_readiness, prev.readiness) {
+            (Some(current), Some(previous)) =>
+                Some(current as i32 - previous as i32),
+            _ => None,
         };
+
+        let readiness_trend = readiness_delta.map(|d| {
+            if d > 0 {
+                "UP".to_string()
+            } else if d < 0 {
+                "DOWN".to_string()
+            } else {
+                "SAME".to_string()
+            }
+        });
+
+        let duration_delta_percent =
+            if prev.duration_seconds > 0 {
+                let diff =
+                    current_duration as i64 - prev.duration_seconds as i64;
+
+                Some(((diff * 100) / prev.duration_seconds as i64) as i32)
+            } else {
+                None
+            };
 
         RegressionAnalysis {
             previous_confidence: Some(prev.confidence),
-            delta: Some(delta),
-            trend: Some(trend.to_string()),
+            confidence_delta: Some(confidence_delta),
+            confidence_trend: Some(confidence_trend.to_string()),
+            previous_readiness: prev.readiness,
+            readiness_delta,
+            readiness_trend,
             duration_delta_percent,
         }
 
@@ -403,10 +466,12 @@ pub fn analyze_regression(
 
         RegressionAnalysis {
             previous_confidence: None,
-            delta: None,
-            trend: None,
+            confidence_delta: None,
+            confidence_trend: None,
+            previous_readiness: None,
+            readiness_delta: None,
+            readiness_trend: None,
             duration_delta_percent: None,
         }
-
     }
 }
