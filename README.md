@@ -14,7 +14,7 @@ It doesn't check whether your backup ran. It proves whether your infrastructure 
 
 Most self-hosters run automated backups. Almost nobody tests restores.
 
-When disaster strikes, backups fail silently in ways nobody anticipated — volumes missing, databases refusing to start, images pulling a different version, services booting in the wrong order, environment variables absent on the restore host.
+When disaster strikes, backups fail silently in ways nobody anticipated — volumes missing, databases refusing to start, images pulling a different version, services booting in the wrong order, environment variables absent on the restore host, external networks that don't exist yet.
 
 A backup succeeding does not mean a restore will succeed.
 
@@ -31,6 +31,9 @@ rehearsa stack test /path/to/docker-compose.yml
 # Pin a restore contract
 rehearsa baseline set /path/to/docker-compose.yml
 
+# First deployment — rehearse and pin all watched stacks at once
+rehearsa baseline auto-init
+
 # Generate a compliance report
 rehearsa report --stack mystack --format pdf
 
@@ -45,7 +48,7 @@ rehearsa status
 Rehearsa performs a controlled restore simulation from your Compose file:
 
 - Parses the Compose file and resolves service dependency order
-- Runs preflight checks — bind mounts, image tags, environment variables
+- Runs preflight checks — bind mounts, image tags, environment variables, external networks
 - Creates an isolated temporary Docker network
 - Boots services in dependency order
 - Scores each service against healthcheck and running state
@@ -75,6 +78,16 @@ DRIFT DETECTED
 
 If confidence drops, readiness falls, services disappear, or duration spikes beyond tolerance — the contract is broken and Rehearsa tells you before a real restore does.
 
+### First deployment
+
+On first install, run auto-init to rehearse every watched stack and pin initial baselines in one command:
+
+```bash
+rehearsa baseline auto-init
+```
+
+This gives you a contracted fleet immediately. Scores are marked as initial baselines pending your review.
+
 ---
 
 ## Scoring Model
@@ -85,6 +98,7 @@ If confidence drops, readiness falls, services disappear, or duration spikes bey
 | RUNNING (no healthcheck) | 85 |
 | UNHEALTHY | 40 |
 | EXITED / failed | 0 |
+| EXITED cleanly (oneshot) | 100 |
 
 Stack confidence is the average of all service scores, banded into risk:
 
@@ -106,8 +120,22 @@ Before any simulation runs, Rehearsa scores the stack's restore readiness on a f
 - **BindMountRule** — flags bind mount paths that must exist before the stack can start
 - **ImagePullRule** — flags `:latest` tags that may pull a different image on restore
 - **EnvVarRule** — detects bare environment variable references missing from the restore host
+- **ExternalNetworkRule** — detects external networks (e.g. `ichor`, `traefik_traefik`) that must be created before the stack can start on a restore host
 
 Every finding is attributed to its source rule with severity and score impact.
+
+---
+
+## Oneshot Services
+
+Services that exit cleanly by design — migration runners, config appliers, one-shot tools like Recyclarr — are supported via a label:
+
+```yaml
+labels:
+  com.rehearsa.oneshot: "true"
+```
+
+A labelled service that exits with code 0 scores 100 instead of 0. Rehearsa understands the difference between a service that failed and one that finished.
 
 ---
 
@@ -137,19 +165,19 @@ Rehearsa runs as a systemd service, watching your Compose files and rehearsing o
 rehearsa daemon install
 
 # Watch a stack with a nightly schedule
-rehearsa daemon watch /path/to/docker-compose.yml --schedule "0 3 * * *"
+rehearsa daemon watch mystack /path/to/docker-compose.yml --schedule "0 3 * * *"
 
 # Check daemon status
 rehearsa daemon status
 ```
 
-Rehearsals fire automatically when a Compose file changes, or on schedule — whichever comes first.
+Rehearsals fire automatically when a Compose file changes, or on schedule — whichever comes first. Simultaneous triggers are handled gracefully — the second is logged as a skip, not a failure.
 
 ---
 
 ## Backup Provider Integration
 
-Attach a named backup provider to a stack so Rehearsa verifies a real snapshot exists before each rehearsal:
+Attach a named backup provider to a stack so Rehearsa verifies a real snapshot exists — and is recent enough — before each rehearsal:
 
 ```bash
 # Register a Restic repository
@@ -158,11 +186,14 @@ rehearsa provider add prod-restic \
   --repo /mnt/nas/backups/restic \
   --password-env RESTIC_PASSWORD
 
+# Enforce snapshot age — fail if last snapshot is older than 25 hours
+rehearsa provider verify-set prod-restic --max-age-hours 25
+
 # Verify it
 rehearsa provider verify prod-restic
 ```
 
-Restic and Borg are supported. If the provider cannot be reached or has no recent snapshot, the rehearsal is blocked with a clear log message.
+Restic and Borg are supported. If the provider cannot be reached, has no snapshots, or the latest snapshot exceeds the declared maximum age, the rehearsal is blocked with a clear log message.
 
 ---
 
@@ -171,9 +202,25 @@ Restic and Borg are supported. If the provider cannot be reached or has no recen
 Rehearsa notifies you when something changes:
 
 ```bash
+# Webhook (Slack, Discord, ntfy, Gotify, any HTTP endpoint)
 rehearsa notify add alerts \
   --url https://ntfy.sh/myserver \
   --secret mysecret
+
+# Email via SMTP
+rehearsa notify add-email alerts \
+  --from "Rehearsa <alerts@example.com>" \
+  --to ops@example.com \
+  --smtp-host smtp.example.com \
+  --smtp-username alerts@example.com \
+  --smtp-password-env SMTP_PASSWORD
+
+# Email via Sendgrid
+rehearsa notify add-email alerts \
+  --provider sendgrid \
+  --from "Rehearsa <alerts@example.com>" \
+  --to ops@example.com \
+  --sendgrid-api-key-env SENDGRID_API_KEY
 ```
 
 Five event types: rehearsal fatal error, provider verification failed, policy violation, baseline drift, and rehearsal recovered. Webhook and email transports supported simultaneously on a single channel.
@@ -204,7 +251,17 @@ rehearsa --strict-integrity stack test docker-compose.yml
 
 ## Compose Compatibility
 
-Rehearsa is designed to work against real-world Compose files — not idealised ones. It handles YAML anchor and merge key patterns (`<<:`), string and sequence forms of `command` and `entrypoint`, mixed environment block styles, and both versioned and unversioned Compose formats.
+Rehearsa is designed to work against real-world Compose files — not idealised ones. The two-layer parser handles all patterns encountered in production self-hosted infrastructure:
+
+- YAML anchor and merge key patterns (`<<:`) in environment blocks and service definitions
+- String and sequence forms of `command` and `entrypoint`
+- Map-form `depends_on` with `condition: service_healthy` and similar
+- Object-form volumes and ports
+- Mixed environment block styles
+- Disabled healthchecks
+- Both versioned and unversioned Compose formats
+
+Validated against 21 production stacks with zero fatal errors.
 
 If Docker can run it, Rehearsa can read it.
 

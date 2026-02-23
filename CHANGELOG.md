@@ -4,6 +4,77 @@ All notable changes to Rehearsa are documented here.
 
 ---
 
+## [0.9.0] — Full Compatibility + Contract Hardening
+
+Rehearsa now works against real infrastructure, not just ideal infrastructure.
+
+0.9.0 is the result of running Rehearsa against a real 21-stack production self-hosted fleet and fixing everything that stood between the tool and honest results. The parser was rebuilt from the ground up. The contract model grew smarter — external networks, oneshot services, and snapshot age enforcement all land in this release. The first-deployment experience is solved with a single command.
+
+### Added
+
+**Two-layer Compose Parser**
+- Complete rewrite of the Compose deserialisation layer
+- Raw YAML parsed first into `serde_yaml::Value` — no field-level fatal errors possible
+- Fields extracted with explicit, tolerant extractors covering all known real-world variations
+- Handles YAML anchor and merge key patterns (`<<:`) in environment blocks and service definitions
+- Handles string and sequence forms of `command` and `entrypoint`
+- Handles map-form `depends_on` with `condition: service_healthy` and similar
+- Handles object-form volumes `{source, target}` and ports `{published, target}`
+- Handles disabled healthchecks (`disable: true`)
+- Labels extracted and exposed for rule and scoring use
+- Validated against 21 production stacks — zero fatal errors
+
+**ExternalNetworkRule**
+- New preflight rule detecting external networks declared in the Compose file
+- Networks that don't exist on the current host: Critical finding, −25 score penalty
+- Networks that exist but are external: Info advisory — must also be created on any restore host
+- Catches the most common silent restore failure in multi-stack homelab environments
+
+**Oneshot Container Scoring**
+- Services labelled `com.rehearsa.oneshot: true` are scored correctly
+- A labelled service that exits with code 0 scores 100 — it finished, it didn't fail
+- Fixes false-zero scoring for Recyclarr, migration runners, config appliers, and any init container pattern
+- Exit code verified against Docker inspect — only genuinely clean exits score 100
+
+**Model B Enforcement — Snapshot Age**
+- `max_snapshot_age_hours` now enforced for both Restic and Borg providers
+- `rehearsa provider verify` reports snapshot age and fails if it exceeds the declared maximum
+- Restic: timestamp parsed from `restic snapshots --json` output
+- Borg: timestamp parsed from `borg list --json` archive metadata
+- `rehearsa provider verify-set <name> --max-age-hours <n>` — configure enforcement per provider
+- The contract now answers: "does a backup exist that is recent enough to restore from?"
+
+**Sendgrid Delivery**
+- Sendgrid email transport fully implemented via HTTP API
+- Sends to Sendgrid v3 `/mail/send` endpoint using `curl` — zero new dependencies
+- API key via literal value or environment variable
+- Multiple recipients supported
+- All five notification events delivered over Sendgrid identically to SMTP
+
+**Baseline Auto-Init**
+- `rehearsa baseline auto-init` — first-deployment contract bootstrapping
+- Rehearses every watched stack and pins the result as an initial baseline
+- Clear output: confidence and readiness per stack, pass/fail summary
+- Baselines marked as initial — output reminds operator to review before enforcing policy
+- Next steps printed on completion: status, show, policy set
+
+**Stack Name Collision Fix**
+- Stack identity now derived from the parent directory name, not the filename
+- Two stacks both named `docker-compose.yml` in different directories no longer collide in history, baseline, or policy
+- Falls back to file stem only when no meaningful parent directory is available
+
+### Fixed
+
+**Lock Contention False Alarms**
+- When the scheduler and file watcher both fire for the same stack simultaneously, the second attempt is now logged as a deliberate skip rather than a failure
+- No `RehearsalFatalError` notification fires for lock contention
+- Log message distinguishes: "already in progress (lock held)" vs genuine failure
+
+### Philosophy
+> "If Docker can run it, Rehearsa can read it. If a contract is declared, Rehearsa enforces it."
+
+---
+
 ## [0.8.1] — Compose Compatibility
 
 Rehearsa now works against real-world infrastructure.
@@ -17,7 +88,7 @@ The goal is simple: if Docker can run it, Rehearsa can read it.
 **YAML merge key support in environment blocks**
 - Compose files using `<<: *anchor` inside environment blocks caused a fatal parse error
 - This pattern is common in real-world stacks that share environment templates across services
-- Merge keys are now skipped cleanly during environment deserialisation — variables from the anchor are ignored rather than crashing the engine
+- Merge keys are now skipped cleanly during environment deserialisation
 - Affected stacks using patterns like `<<: *common-env` alongside additional env vars now parse correctly
 
 **String `command` field support**
