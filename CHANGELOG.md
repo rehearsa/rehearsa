@@ -4,6 +4,35 @@ All notable changes to Rehearsa are documented here.
 
 ---
 
+## [0.8.1] — Compose Compatibility
+
+Rehearsa now works against real-world infrastructure.
+
+This patch release was driven by testing against production Docker Compose stacks on live self-hosted infrastructure. Two parser bugs were found and fixed — both caused fatal errors that blocked rehearsals entirely on stacks that Docker itself runs without complaint.
+
+The goal is simple: if Docker can run it, Rehearsa can read it.
+
+### Fixed
+
+**YAML merge key support in environment blocks**
+- Compose files using `<<: *anchor` inside environment blocks caused a fatal parse error
+- This pattern is common in real-world stacks that share environment templates across services
+- Merge keys are now skipped cleanly during environment deserialisation — variables from the anchor are ignored rather than crashing the engine
+- Affected stacks using patterns like `<<: *common-env` alongside additional env vars now parse correctly
+
+**String `command` field support**
+- Docker Compose allows `command` as either a string (`command: "--force"`) or a sequence (`command: ["--force"]`)
+- Rehearsa only accepted the sequence form — a plain string caused a fatal parse error
+- Both forms are now accepted and normalised to a string list internally
+
+### Compatibility
+Both fixes were validated against production stacks using real infrastructure before release. The regression test covered four affected stacks across both bug patterns with no regressions.
+
+### Philosophy
+> "If Docker can run it, Rehearsa can read it."
+
+---
+
 ## [0.8.0] — Compliance, Contracts, and Coverage
 
 Rehearsa grew up.
