@@ -227,6 +227,14 @@ enum DaemonCommands {
         stack: String,
     },
     List,
+    /// Set the maximum number of simultaneous rehearsals.
+    /// Restart the daemon after changing.
+    SetConcurrency {
+        /// Maximum concurrent rehearsals (minimum: 1, recommended: 1 for low-power hardware)
+        limit: usize,
+    },
+    /// Show current daemon configuration and resolved settings.
+    Config,
 }
 
 #[derive(Subcommand)]
@@ -826,6 +834,18 @@ async fn main() {
             }
             DaemonCommands::List => {
                 if let Err(e) = daemon::list_watches() {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::SetConcurrency { limit } => {
+                if let Err(e) = daemon::set_concurrency(limit) {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Config => {
+                if let Err(e) = daemon::show_config() {
                     eprintln!("Daemon error: {}", e);
                     exit(1);
                 }

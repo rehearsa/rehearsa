@@ -3,7 +3,108 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use chrono::Utc;
+
+// ======================================================
+// DAEMON CONFIG
+// ======================================================
+
+const CONFIG_PATH: &str = "/etc/rehearsa/config.json";
+const DEFAULT_MAX_CONCURRENT: usize = 1;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DaemonConfig {
+    /// Maximum number of rehearsals to run simultaneously.
+    /// Override via REHEARSA_MAX_CONCURRENT env var or `rehearsa daemon set-concurrency`.
+    #[serde(default)]
+    pub max_concurrent_rehearsals: Option<usize>,
+}
+
+pub fn load_config() -> DaemonConfig {
+    let raw = match fs::read_to_string(CONFIG_PATH) {
+        Ok(r) => r,
+        Err(_) => return DaemonConfig::default(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+pub fn save_config(config: &DaemonConfig) -> Result<(), String> {
+    fs::create_dir_all("/etc/rehearsa")
+        .map_err(|e| format!("Failed to create /etc/rehearsa: {}", e))?;
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    fs::write(CONFIG_PATH, json)
+        .map_err(|e| format!("Failed to write config: {}
+Try running with sudo.", e))
+}
+
+/// Resolve the concurrency limit using three-tier precedence:
+/// 1. REHEARSA_MAX_CONCURRENT env var
+/// 2. /etc/rehearsa/config.json
+/// 3. DEFAULT_MAX_CONCURRENT (1)
+pub fn resolve_concurrency() -> usize {
+    // Tier 1: environment variable
+    if let Ok(val) = std::env::var("REHEARSA_MAX_CONCURRENT") {
+        if let Ok(n) = val.trim().parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+
+    // Tier 2: config file
+    let config = load_config();
+    if let Some(n) = config.max_concurrent_rehearsals {
+        if n > 0 {
+            return n;
+        }
+    }
+
+    // Tier 3: default
+    DEFAULT_MAX_CONCURRENT
+}
+
+pub fn set_concurrency(n: usize) -> Result<(), String> {
+    if n == 0 {
+        return Err("Concurrency limit must be at least 1.".to_string());
+    }
+    let mut config = load_config();
+    config.max_concurrent_rehearsals = Some(n);
+    save_config(&config)?;
+    println!("Max concurrent rehearsals set to {}.", n);
+    println!("Restart the daemon for the change to take effect: systemctl restart rehearsa");
+    Ok(())
+}
+
+pub fn show_config() -> Result<(), String> {
+    let config = load_config();
+    let resolved = resolve_concurrency();
+
+    println!();
+    println!("Rehearsa Daemon Config");
+    println!("{}", "─".repeat(40));
+    println!(
+        "  max_concurrent_rehearsals : {} (resolved: {})",
+        config.max_concurrent_rehearsals
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not set".to_string()),
+        resolved
+    );
+
+    // Show source
+    if std::env::var("REHEARSA_MAX_CONCURRENT").is_ok() {
+        println!("  source: REHEARSA_MAX_CONCURRENT env var");
+    } else if config.max_concurrent_rehearsals.is_some() {
+        println!("  source: {}", CONFIG_PATH);
+    } else {
+        println!("  source: default");
+    }
+
+    println!();
+    Ok(())
+}
 
 // ======================================================
 // DATA STRUCTURES
@@ -309,8 +410,13 @@ pub async fn run_daemon() -> Result<(), String> {
 
     println!("Watching for changes. Logs via: journalctl -u rehearsa -f");
 
+    // Shared semaphore — limits simultaneous rehearsals across scheduler and file watcher
+    let max_concurrent = resolve_concurrency();
+    println!("Concurrency limit: {} simultaneous rehearsal(s)", max_concurrent);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+
     // Spawn the cron scheduler as a separate task
-    tokio::spawn(run_scheduler());
+    tokio::spawn(run_scheduler(Arc::clone(&semaphore)));
 
     loop {
         match rx.recv_timeout(Duration::from_secs(60)) {
@@ -329,12 +435,20 @@ pub async fn run_daemon() -> Result<(), String> {
                                     Utc::now().to_rfc3339(),
                                     watch.stack
                                 );
-                                trigger_rehearsal(
-                                    &watch.stack,
-                                    &watch.compose_path,
-                                    watch.provider.as_deref(),
-                                    watch.notify.as_deref(),
-                                ).await;
+                                let sem = Arc::clone(&semaphore);
+                                let stack = watch.stack.clone();
+                                let compose_path = watch.compose_path.clone();
+                                let provider = watch.provider.clone();
+                                let notify_ch = watch.notify.clone();
+                                tokio::spawn(async move {
+                                    let _permit = sem.acquire().await;
+                                    trigger_rehearsal(
+                                        &stack,
+                                        &compose_path,
+                                        provider.as_deref(),
+                                        notify_ch.as_deref(),
+                                    ).await;
+                                });
                             }
                         }
                     }
@@ -391,7 +505,7 @@ fn save_scheduler_state(last_run: &HashMap<String, chrono::DateTime<Utc>>) {
 /// checks whether any scheduled stack is due, and fires trigger_rehearsal.
 /// Last-run times are persisted to disk so catch_up works correctly across
 /// daemon restarts.
-async fn run_scheduler() {
+async fn run_scheduler(semaphore: Arc<Semaphore>) {
     use std::str::FromStr;
     use tokio::time::Duration;
 
@@ -480,12 +594,24 @@ async fn run_scheduler() {
                 "[{}] Scheduler: running rehearsal for '{}' (schedule: {})",
                 now.to_rfc3339(), watch.stack, expr
             );
-            trigger_rehearsal(
-                &watch.stack,
-                &watch.compose_path,
-                watch.provider.as_deref(),
-                watch.notify.as_deref(),
-            ).await;
+            let sem = Arc::clone(&semaphore);
+            let stack = watch.stack.clone();
+            let compose_path = watch.compose_path.clone();
+            let provider = watch.provider.clone();
+            let notify_ch = watch.notify.clone();
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await;
+                println!(
+                    "[{}] Semaphore acquired for '{}' — starting rehearsal",
+                    chrono::Utc::now().to_rfc3339(), stack
+                );
+                trigger_rehearsal(
+                    &stack,
+                    &compose_path,
+                    provider.as_deref(),
+                    notify_ch.as_deref(),
+                ).await;
+            });
         }
     }
 }
