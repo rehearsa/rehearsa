@@ -149,6 +149,12 @@ enum DaemonCommands {
     Watch {
         stack: String,
         compose_file: String,
+        /// Cron expression for scheduled rehearsals, e.g. "0 3 * * *"
+        #[arg(long)]
+        schedule: Option<String>,
+        /// Run a rehearsal on daemon start if a scheduled window was missed
+        #[arg(long, default_value_t = false)]
+        catch_up: bool,
     },
     Unwatch {
         stack: String,
@@ -478,8 +484,8 @@ async fn main() {
                     exit(1);
                 }
             }
-            DaemonCommands::Watch { stack, compose_file } => {
-                if let Err(e) = daemon::add_watch(&stack, &compose_file) {
+            DaemonCommands::Watch { stack, compose_file, schedule, catch_up } => {
+                if let Err(e) = daemon::add_watch(&stack, &compose_file, schedule.as_deref(), catch_up) {
                     eprintln!("Daemon error: {}", e);
                     exit(1);
                 }

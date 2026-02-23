@@ -13,6 +13,12 @@ pub struct WatchEntry {
     pub stack: String,
     pub compose_path: String,
     pub added: String,
+    /// Optional cron expression (5-field, e.g. "0 3 * * *"). If absent, file-watch only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// If true, run immediately on daemon start if a scheduled run was missed. Defaults false.
+    #[serde(default)]
+    pub catch_up: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -24,6 +30,7 @@ pub struct WatchRegistry {
 // PATH HELPERS
 // ======================================================
 
+#[allow(dead_code)]
 fn rehearsa_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir()
         .ok_or("Could not determine home directory")?;
@@ -66,8 +73,18 @@ pub fn save_registry(registry: &WatchRegistry) -> Result<(), String> {
         .map_err(|e| format!("Failed to write watches: {}\nTry running with sudo.", e))
 }
 
-pub fn add_watch(stack: &str, compose_path: &str) -> Result<(), String> {
+pub fn add_watch(stack: &str, compose_path: &str, schedule: Option<&str>, catch_up: bool) -> Result<(), String> {
+    use std::str::FromStr;
+
     let mut registry = load_registry()?;
+
+    // Validate cron expression if provided
+    if let Some(expr) = schedule {
+        // Prepend seconds field (0) since the cron crate uses 6-field expressions
+        let full_expr = format!("0 {}", expr);
+        cron::Schedule::from_str(&full_expr)
+            .map_err(|e| format!("Invalid cron expression '{}': {}", expr, e))?;
+    }
 
     // Remove existing entry for this stack if present
     registry.watches.retain(|w| w.stack != stack);
@@ -80,10 +97,15 @@ pub fn add_watch(stack: &str, compose_path: &str) -> Result<(), String> {
         stack: stack.to_string(),
         compose_path: abs_path.to_string_lossy().to_string(),
         added: Utc::now().to_rfc3339(),
+        schedule: schedule.map(|s| s.to_string()),
+        catch_up,
     });
 
     save_registry(&registry)?;
     println!("Watching '{}' at {}", stack, abs_path.display());
+    if let Some(expr) = schedule {
+        println!("Schedule : {}", expr);
+    }
     Ok(())
 }
 
@@ -108,11 +130,12 @@ pub fn list_watches() -> Result<(), String> {
     }
 
     println!("Watched Stacks");
-    println!("{}", "─".repeat(60));
-    println!("{:<20} {}", "Stack", "Compose Path");
-    println!("{}", "─".repeat(60));
+    println!("{}", "─".repeat(80));
+    println!("{:<20} {:<30} {}", "Stack", "Compose Path", "Schedule");
+    println!("{}", "─".repeat(80));
     for w in &registry.watches {
-        println!("{:<20} {}", w.stack, w.compose_path);
+        let schedule = w.schedule.as_deref().unwrap_or("—");
+        println!("{:<20} {:<30} {}", w.stack, w.compose_path, schedule);
     }
     Ok(())
 }
@@ -238,7 +261,8 @@ pub async fn run_daemon() -> Result<(), String> {
     println!("Rehearsa daemon starting...");
     println!("Watching {} stack(s):", registry.watches.len());
     for w in &registry.watches {
-        println!("  {} → {}", w.stack, w.compose_path);
+        let sched = w.schedule.as_deref().unwrap_or("no schedule");
+        println!("  {} → {}  [{}]", w.stack, w.compose_path, sched);
     }
 
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
@@ -257,6 +281,9 @@ pub async fn run_daemon() -> Result<(), String> {
     }
 
     println!("Watching for changes. Logs via: journalctl -u rehearsa -f");
+
+    // Spawn the cron scheduler as a separate task
+    tokio::spawn(run_scheduler());
 
     loop {
         match rx.recv_timeout(Duration::from_secs(60)) {
@@ -296,6 +323,84 @@ pub async fn run_daemon() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ======================================================
+// CRON SCHEDULER
+// ======================================================
+
+/// Runs in a background task. Every 30 seconds it re-reads the registry,
+/// checks whether any scheduled stack is due, and fires trigger_rehearsal.
+/// Last-run times are tracked in memory — missed runs while the daemon was
+/// down are skipped (catch_up defaults false).
+async fn run_scheduler() {
+    use std::str::FromStr;
+    use std::collections::HashMap;
+    use tokio::time::Duration;
+
+    // Map of stack name → last time a scheduled rehearsal was fired
+    let mut last_run: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        let registry = match load_registry() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[{}] Scheduler: failed to load registry: {}", Utc::now().to_rfc3339(), e);
+                continue;
+            }
+        };
+
+        let now = Utc::now();
+
+        for watch in &registry.watches {
+            let expr = match &watch.schedule {
+                Some(e) => e,
+                None => continue, // no schedule for this stack
+            };
+
+            // cron crate requires a 6-field expression (with seconds). We store
+            // 5-field (standard cron) and prepend "0 " to fix seconds at 0.
+            let full_expr = format!("0 {}", expr);
+            let schedule = match cron::Schedule::from_str(&full_expr) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "[{}] Scheduler: invalid cron '{}' for stack '{}': {}",
+                        now.to_rfc3339(), expr, watch.stack, e
+                    );
+                    continue;
+                }
+            };
+
+            // Find the most recent scheduled time that has already passed
+            let last_fire = schedule
+                .after(&(now - chrono::Duration::hours(25)))
+                .take_while(|t| t <= &now)
+                .last();
+
+            let last_fire = match last_fire {
+                Some(t) => t,
+                None => continue, // no scheduled time has passed yet
+            };
+
+            // Have we already run this slot?
+            if let Some(&prev) = last_run.get(&watch.stack) {
+                if prev >= last_fire {
+                    continue; // already fired this window
+                }
+            }
+
+            // Record and fire
+            last_run.insert(watch.stack.clone(), last_fire);
+            println!(
+                "[{}] Scheduler: running rehearsal for '{}' (schedule: {})",
+                now.to_rfc3339(), watch.stack, expr
+            );
+            trigger_rehearsal(&watch.stack, &watch.compose_path).await;
+        }
+    }
 }
 
 // ======================================================

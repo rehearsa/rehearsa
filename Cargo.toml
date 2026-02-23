@@ -30,6 +30,7 @@ sha2 = "0.10"
 async-trait = "0.1"
 colored = "2"
 notify = "6.1"
+cron = "0.12"
 
 [[bin]]
 name = "rehearsa"
