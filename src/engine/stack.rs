@@ -18,7 +18,7 @@ use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 use std::time::Instant;
 
-use crate::docker::compose::{ComposeFile, HealthCheck};
+use crate::docker::compose::HealthCheck;
 use crate::engine::graph::topological_sort;
 use crate::engine::preflight::{PreflightContext, run_preflight, Severity};
 use crate::lock::StackLock;
@@ -91,7 +91,7 @@ pub async fn test_stack(
     let start_time = Instant::now();
 
     let content = fs::read_to_string(path)?;
-    let compose: ComposeFile = serde_yaml::from_str(&content)?;
+    let compose = crate::docker::compose::parse_compose(&content).map_err(|e| anyhow!(e))?;
 
     // ======================================================
     // PREFLIGHT

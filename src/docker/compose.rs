@@ -1,43 +1,28 @@
-use serde::Deserialize;
 use std::collections::HashMap;
 
 // ======================================================
-// ROOT STRUCT
+// PUBLIC STRUCTS
 // ======================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ComposeFile {
     pub services: HashMap<String, Service>,
 }
 
-// ======================================================
-// SERVICE
-// ======================================================
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct Service {
     pub image: Option<String>,
-
-    #[serde(default, deserialize_with = "deserialize_environment")]
     pub environment: Option<Vec<String>>,
-
-    // Reserved for future volume simulation support
     #[allow(dead_code)]
     pub volumes: Option<Vec<String>>,
-
     pub depends_on: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_command")]
     pub command: Option<Vec<String>>,
-
-    // ✅ NEW: Healthcheck support
     pub healthcheck: Option<HealthCheck>,
+    pub ports: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
 }
 
-// ======================================================
-// HEALTHCHECK STRUCT
-// ======================================================
-
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct HealthCheck {
     pub test: Option<Vec<String>>,
     pub interval: Option<String>,
@@ -46,88 +31,221 @@ pub struct HealthCheck {
 }
 
 // ======================================================
-// ENVIRONMENT DESERIALIZER
+// ENTRY POINT
 // ======================================================
 
-fn deserialize_environment<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::{MapAccess, SeqAccess, Visitor};
-    use std::fmt;
+pub fn parse_compose(content: &str) -> Result<ComposeFile, String> {
+    let root: serde_yaml::Value =
+        serde_yaml::from_str(content).map_err(|e| format!("YAML parse error: {}", e))?;
 
-    struct EnvVisitor;
+    let services_raw = match root.get("services") {
+        Some(serde_yaml::Value::Mapping(m)) => m,
+        _ => return Err("No services block found in Compose file".to_string()),
+    };
 
-    impl<'de> Visitor<'de> for EnvVisitor {
-        type Value = Option<Vec<String>>;
+    let mut services = HashMap::new();
 
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("map or sequence for environment")
-        }
+    for (key, value) in services_raw {
+        let name = match key.as_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
 
-        fn visit_none<E>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
+        let svc_map = match value {
+            serde_yaml::Value::Mapping(m) => m,
+            _ => continue,
+        };
 
-        fn visit_unit<E>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
+        let service = Service {
+            image: extract_string(svc_map, "image"),
+            environment: extract_environment(svc_map),
+            volumes: extract_string_list(svc_map, "volumes"),
+            depends_on: extract_depends_on(svc_map),
+            command: extract_string_or_list(svc_map, "command"),
+            entrypoint: extract_string_or_list(svc_map, "entrypoint"),
+            healthcheck: extract_healthcheck(svc_map),
+            ports: extract_ports(svc_map),
+        };
 
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut env = Vec::new();
-            while let Some(value) = seq.next_element::<String>()? {
-                env.push(value);
-            }
-            Ok(Some(env))
-        }
-
-        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-        where
-            M: MapAccess<'de>,
-        {
-            let mut env = Vec::new();
-            while let Some(key) = map.next_key::<String>()? {
-                if key == "<<" {
-                    let _ = map.next_value::<serde_yaml::Value>()?;
-                    continue;
-                }
-                match map.next_value::<serde_yaml::Value>()? {
-                    serde_yaml::Value::String(s) => env.push(format!("{}={}", key, s)),
-                    serde_yaml::Value::Number(n) => env.push(format!("{}={}", key, n)),
-                    serde_yaml::Value::Bool(b) => env.push(format!("{}={}", key, b)),
-                    serde_yaml::Value::Null => {}
-                    _ => {}
-                }
-            }
-            Ok(Some(env))
-        }
+        services.insert(name, service);
     }
 
-    deserializer.deserialize_any(EnvVisitor)
+    Ok(ComposeFile { services })
 }
 
-fn deserialize_command<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let val = serde_yaml::Value::deserialize(deserializer)?;
-    match val {
-        serde_yaml::Value::Null => Ok(None),
-        serde_yaml::Value::String(s) => Ok(Some(vec![s])),
-        serde_yaml::Value::Sequence(seq) => {
+// ======================================================
+// FIELD EXTRACTORS
+// ======================================================
+
+fn extract_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    match map.get(key) {
+        Some(serde_yaml::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn extract_string_or_list(map: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> {
+    match map.get(key) {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(serde_yaml::Value::String(s)) => Some(vec![s.clone()]),
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let out: Vec<String> = seq.iter().filter_map(value_to_string).collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+        _ => None,
+    }
+}
+
+fn extract_string_list(map: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> {
+    match map.get(key) {
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let out: Vec<String> = seq
+                .iter()
+                .filter_map(|v| match v {
+                    serde_yaml::Value::String(s) => Some(s.clone()),
+                    serde_yaml::Value::Mapping(m) => {
+                        let source = m.get("source").and_then(|v| v.as_str());
+                        let target = m.get("target").and_then(|v| v.as_str());
+                        match (source, target) {
+                            (Some(s), Some(t)) => Some(format!("{}:{}", s, t)),
+                            (None, Some(t)) => Some(t.to_string()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+        _ => None,
+    }
+}
+
+fn extract_environment(map: &serde_yaml::Mapping) -> Option<Vec<String>> {
+    match map.get("environment") {
+        None | Some(serde_yaml::Value::Null) => None,
+
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let out: Vec<String> = seq.iter().filter_map(value_to_string).collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+
+        Some(serde_yaml::Value::Mapping(m)) => {
             let mut out = Vec::new();
-            for v in seq {
-                if let serde_yaml::Value::String(s) = v {
-                    out.push(s);
+            for (k, v) in m {
+                if k.as_str() == Some("<<") {
+                    continue;
+                }
+                let key = match k.as_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                match v {
+                    serde_yaml::Value::Null => {
+                        out.push(key.to_string());
+                    }
+                    other => {
+                        if let Some(s) = value_to_string(other) {
+                            out.push(format!("{}={}", key, s));
+                        }
+                    }
                 }
             }
-            Ok(Some(out))
+            if out.is_empty() { None } else { Some(out) }
         }
-        _ => Ok(None),
+
+        _ => None,
+    }
+}
+
+fn extract_depends_on(map: &serde_yaml::Mapping) -> Option<Vec<String>> {
+    match map.get("depends_on") {
+        None | Some(serde_yaml::Value::Null) => None,
+
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let out: Vec<String> = seq
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+
+        Some(serde_yaml::Value::Mapping(m)) => {
+            let out: Vec<String> = m
+                .iter()
+                .filter_map(|(k, _)| k.as_str().map(|s| s.to_string()))
+                .collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+
+        _ => None,
+    }
+}
+
+fn extract_healthcheck(map: &serde_yaml::Mapping) -> Option<HealthCheck> {
+    let hc = match map.get("healthcheck") {
+        Some(serde_yaml::Value::Mapping(m)) => m,
+        _ => return None,
+    };
+
+    if let Some(serde_yaml::Value::Bool(true)) = hc.get("disable") {
+        return None;
+    }
+
+    let test = match hc.get("test") {
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let parts: Vec<String> = seq
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if parts.is_empty() { None } else { Some(parts) }
+        }
+        Some(serde_yaml::Value::String(s)) => Some(vec![s.clone()]),
+        _ => None,
+    };
+
+    let interval = hc.get("interval").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let timeout  = hc.get("timeout").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let retries  = hc.get("retries").and_then(|v| v.as_u64());
+
+    Some(HealthCheck { test, interval, timeout, retries })
+}
+
+fn extract_ports(map: &serde_yaml::Mapping) -> Option<Vec<String>> {
+    match map.get("ports") {
+        Some(serde_yaml::Value::Sequence(seq)) => {
+            let out: Vec<String> = seq
+                .iter()
+                .filter_map(|v| match v {
+                    serde_yaml::Value::String(s) => Some(s.clone()),
+                    serde_yaml::Value::Number(n) => Some(n.to_string()),
+                    serde_yaml::Value::Mapping(m) => {
+                        let published = m.get("published").and_then(value_to_string);
+                        let target    = m.get("target").and_then(value_to_string);
+                        match (published, target) {
+                            (Some(p), Some(t)) => Some(format!("{}:{}", p, t)),
+                            (None, Some(t))    => Some(t),
+                            _                  => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            if out.is_empty() { None } else { Some(out) }
+        }
+        _ => None,
+    }
+}
+
+// ======================================================
+// HELPERS
+// ======================================================
+
+fn value_to_string(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b)   => Some(b.to_string()),
+        _ => None,
     }
 }
