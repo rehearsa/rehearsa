@@ -4,10 +4,10 @@ mod lock;
 mod history;
 mod policy;
 mod baseline;
+mod daemon;
 
 use clap::{Parser, Subcommand};
 use std::process::exit;
-use std::fs;
 
 use engine::stack::{test_stack, PullPolicy};
 use policy::{StackPolicy, save_policy, show_policy, delete_policy};
@@ -66,6 +66,10 @@ enum Commands {
     Baseline {
         #[command(subcommand)]
         command: BaselineCommands,
+    },
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
     },
     Status,
     Version,
@@ -134,6 +138,22 @@ enum BaselineCommands {
     Delete {
         stack: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    Install,
+    Uninstall,
+    Status,
+    Run,
+    Watch {
+        stack: String,
+        compose_file: String,
+    },
+    Unwatch {
+        stack: String,
+    },
+    List,
 }
 
 // ======================================================
@@ -426,6 +446,55 @@ async fn main() {
                     exit(1);
                 }
                 println!("Baseline deleted for '{}'", stack);
+            }
+        },
+
+        // ==================================================
+        // DAEMON
+        // ==================================================
+
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Install => {
+                if let Err(e) = daemon::install_daemon() {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Uninstall => {
+                if let Err(e) = daemon::uninstall_daemon() {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Status => {
+                if let Err(e) = daemon::daemon_status() {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Run => {
+                if let Err(e) = daemon::run_daemon().await {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Watch { stack, compose_file } => {
+                if let Err(e) = daemon::add_watch(&stack, &compose_file) {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::Unwatch { stack } => {
+                if let Err(e) = daemon::remove_watch(&stack) {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+            DaemonCommands::List => {
+                if let Err(e) = daemon::list_watches() {
+                    eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
             }
         },
 
