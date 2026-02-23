@@ -12,8 +12,11 @@ use crate::docker::compose::ComposeFile;
 // ======================================================
 
 pub struct PreflightContext<'a> {
-    pub compose: &'a ComposeFile,
-    pub docker: &'a Docker,
+    pub compose:     &'a ComposeFile,
+    pub docker:      &'a Docker,
+    /// Snapshot of the host environment at rehearsal time.
+    /// Used by EnvVarRule to detect variables referenced in compose
+    /// but absent from the restore host.
     pub environment: HashMap<String, String>,
 }
 
@@ -23,8 +26,11 @@ pub struct PreflightContext<'a> {
 
 #[derive(Debug, Clone)]
 pub enum Severity {
+    /// Informational — no score penalty. Used for advisories.
     Info,
+    /// Potential restore risk — small penalty.
     Warning,
+    /// Likely restore failure — large penalty.
     Critical,
 }
 
@@ -34,10 +40,11 @@ pub enum Severity {
 
 #[derive(Debug, Clone)]
 pub struct PreflightFinding {
-    pub rule: &'static str,
+    /// Name of the rule that produced this finding.
+    pub rule:     &'static str,
     pub severity: Severity,
-    pub message: String,
-    pub penalty: u32,
+    pub message:  String,
+    pub penalty:  u32,
 }
 
 // ======================================================
@@ -46,7 +53,7 @@ pub struct PreflightFinding {
 
 #[derive(Debug)]
 pub struct RestoreReadiness {
-    pub score: u32,
+    pub score:    u32,
     pub findings: Vec<PreflightFinding>,
 }
 
@@ -73,9 +80,7 @@ pub struct BindMountRule;
 #[async_trait]
 impl PreflightRule for BindMountRule {
 
-    fn name(&self) -> &'static str {
-        "BindMountRule"
-    }
+    fn name(&self) -> &'static str { "BindMountRule" }
 
     async fn evaluate(
         &self,
@@ -85,39 +90,36 @@ impl PreflightRule for BindMountRule {
         let mut findings = Vec::new();
 
         for (service_name, service) in &ctx.compose.services {
-
             if let Some(volumes) = &service.volumes {
-
                 for volume in volumes {
-
                     if let Some((host_path, _container_path)) = volume.split_once(':') {
 
-                        // Skip named volumes
+                        // Skip named volumes — only check absolute host paths
                         if !host_path.starts_with('/') {
                             continue;
                         }
 
                         if !Path::new(host_path).exists() {
                             findings.push(PreflightFinding {
-                                rule: self.name(),
+                                rule:     self.name(),
                                 severity: Severity::Critical,
-                                message: format!(
+                                message:  format!(
                                     "Service '{}' references missing bind path: {}",
-                                    service_name,
-                                    host_path
+                                    service_name, host_path
                                 ),
                                 penalty: 25,
                             });
                         } else {
+                            // Path exists but bind mounts are still a restore risk —
+                            // the data at that path may not have been restored yet.
                             findings.push(PreflightFinding {
-                                rule: self.name(),
-                                severity: Severity::Warning,
-                                message: format!(
-                                    "Service '{}' uses bind mount: {}",
-                                    service_name,
-                                    host_path
+                                rule:     self.name(),
+                                severity: Severity::Info,
+                                message:  format!(
+                                    "Service '{}' uses bind mount '{}' — ensure data is restored before rehearsal",
+                                    service_name, host_path
                                 ),
-                                penalty: 5,
+                                penalty: 0,
                             });
                         }
                     }
@@ -138,9 +140,7 @@ pub struct ImagePullRule;
 #[async_trait]
 impl PreflightRule for ImagePullRule {
 
-    fn name(&self) -> &'static str {
-        "ImagePullRule"
-    }
+    fn name(&self) -> &'static str { "ImagePullRule" }
 
     async fn evaluate(
         &self,
@@ -150,17 +150,16 @@ impl PreflightRule for ImagePullRule {
         let mut findings = Vec::new();
 
         for (service_name, service) in &ctx.compose.services {
-
             if let Some(image) = &service.image {
 
-                // Warn if using :latest
-                if image.ends_with(":latest") {
+                // Warn if using :latest — non-deterministic across restore hosts
+                if image.ends_with(":latest") || !image.contains(':') {
                     findings.push(PreflightFinding {
-                        rule: self.name(),
+                        rule:     self.name(),
                         severity: Severity::Warning,
-                        message: format!(
-                            "Service '{}' uses :latest tag (non-deterministic restore)",
-                            service_name
+                        message:  format!(
+                            "Service '{}' uses unpinned image tag '{}' — restore may produce a different version",
+                            service_name, image
                         ),
                         penalty: 5,
                     });
@@ -168,10 +167,11 @@ impl PreflightRule for ImagePullRule {
 
                 // Attempt pull to simulate fresh host availability
                 let options = Some(CreateImageOptions::<String> {
-    from_image: image.clone(),
-    tag: "latest".to_string(),
-    ..Default::default()
-});
+                    from_image: image.clone(),
+                    tag: "latest".to_string(),
+                    ..Default::default()
+                });
+
                 let result = ctx.docker
                     .create_image(options, None, None)
                     .try_collect::<Vec<_>>()
@@ -179,16 +179,89 @@ impl PreflightRule for ImagePullRule {
 
                 if result.is_err() {
                     findings.push(PreflightFinding {
-                        rule: self.name(),
+                        rule:     self.name(),
                         severity: Severity::Critical,
-                        message: format!(
-                            "Service '{}' image '{}' cannot be pulled",
-                            service_name,
-                            image
+                        message:  format!(
+                            "Service '{}' image '{}' cannot be pulled — restore will fail on a fresh host",
+                            service_name, image
                         ),
                         penalty: 30,
                     });
                 }
+            }
+        }
+
+        findings
+    }
+}
+
+// ======================================================
+// RULE 3: Environment Variable Check
+// ======================================================
+//
+// Docker Compose supports two env entry formats:
+//   KEY=value   — explicit value, always available
+//   KEY         — bare key, inherited from the host environment
+//
+// Bare keys are a restore risk: if the variable isn't set on the
+// restore host, the container starts with it unset — silently.
+// This rule surfaces all bare-key references so operators know
+// exactly which variables must be present on a restore host.
+
+pub struct EnvVarRule;
+
+#[async_trait]
+impl PreflightRule for EnvVarRule {
+
+    fn name(&self) -> &'static str { "EnvVarRule" }
+
+    async fn evaluate(
+        &self,
+        ctx: &PreflightContext<'_>,
+    ) -> Vec<PreflightFinding> {
+
+        let mut findings = Vec::new();
+
+        for (service_name, service) in &ctx.compose.services {
+            let entries = match &service.environment {
+                Some(e) => e,
+                None    => continue,
+            };
+
+            for entry in entries {
+                // Bare key — no '=' present — means "inherit from host"
+                if !entry.contains('=') {
+                    let key = entry.trim();
+
+                    if ctx.environment.contains_key(key) {
+                        // Present on this host — advisory only, still a risk
+                        // on a different restore host
+                        findings.push(PreflightFinding {
+                            rule:     self.name(),
+                            severity: Severity::Info,
+                            message:  format!(
+                                "Service '{}' inherits '{}' from host environment — \
+                                 must be set on any restore host",
+                                service_name, key
+                            ),
+                            penalty: 0,
+                        });
+                    } else {
+                        // Not set on this host — container will start with
+                        // this variable unset, which is likely a misconfiguration
+                        findings.push(PreflightFinding {
+                            rule:     self.name(),
+                            severity: Severity::Critical,
+                            message:  format!(
+                                "Service '{}' requires env var '{}' but it is not set \
+                                 on this host — container will start misconfigured",
+                                service_name, key
+                            ),
+                            penalty: 20,
+                        });
+                    }
+                }
+                // KEY=value entries are self-contained — no finding needed
             }
         }
 
@@ -207,6 +280,7 @@ pub async fn run_preflight(
     let rules: Vec<Box<dyn PreflightRule>> = vec![
         Box::new(BindMountRule),
         Box::new(ImagePullRule),
+        Box::new(EnvVarRule),
     ];
 
     let mut findings = Vec::new();
@@ -226,12 +300,9 @@ pub async fn run_preflight(
 // ======================================================
 
 fn compute_score(findings: &[PreflightFinding]) -> u32 {
-
     let mut score: u32 = 100;
-
     for finding in findings {
         score = score.saturating_sub(finding.penalty);
     }
-
     score
 }

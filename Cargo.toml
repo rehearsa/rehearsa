@@ -1,6 +1,6 @@
 [package]
 name = "rehearsa"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["Rehearsa Contributors"]
 description = "Restore rehearsal engine for Docker-based self-hosted environments."
@@ -31,6 +31,8 @@ async-trait = "0.1"
 colored = "2"
 notify = "6.1"
 cron = "0.12"
+printpdf = "0.7"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }
 
 [[bin]]
 name = "rehearsa"

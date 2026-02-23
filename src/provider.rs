@@ -19,12 +19,14 @@ const PROVIDERS_PATH: &str = "/etc/rehearsa/providers.json";
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Restic,
+    Borg,
 }
 
 impl std::fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderKind::Restic => write!(f, "restic"),
+            ProviderKind::Borg   => write!(f, "borg"),
         }
     }
 }
@@ -116,10 +118,11 @@ pub fn add_provider(
 ) -> io::Result<()> {
     let kind = match kind_str {
         "restic" => ProviderKind::Restic,
+        "borg"   => ProviderKind::Borg,
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Unknown provider kind '{}'. Supported: restic", other),
+                format!("Unknown provider kind '{}'. Supported: restic, borg", other),
             ))
         }
     };
@@ -237,6 +240,7 @@ pub fn verify_provider(name: &str) -> io::Result<()> {
 
     match provider.kind {
         ProviderKind::Restic => verify_restic(provider),
+        ProviderKind::Borg   => verify_borg(provider),
     }
 }
 
@@ -321,6 +325,142 @@ fn verify_restic(provider: &ProviderConfig) -> io::Result<()> {
     println!();
     println!("Status: PROVIDER OK");
     Ok(())
+}
+
+
+fn verify_borg(provider: &ProviderConfig) -> io::Result<()> {
+    // borg info <repo> --json — checks reachability and returns repo metadata.
+    // borg list <repo> --last 1 --json — confirms at least one archive exists.
+
+    // ── Step 1: repo info (reachability) ─────────────────────────────────
+    let mut info_cmd = Command::new("borg");
+    info_cmd.arg("info")
+            .arg("--json")
+            .arg(&provider.repository);
+
+    inject_borg_credentials(&mut info_cmd, provider);
+
+    println!("Repository : {}", provider.repository);
+    print!("Reachable  : ");
+
+    let info_out = info_cmd.output().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Failed to run borg (is it installed?): {}", e),
+        )
+    })?;
+
+    if !info_out.status.success() {
+        let stderr = String::from_utf8_lossy(&info_out.stderr);
+        println!("✗ FAILED");
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("borg error: {}", stderr.trim()),
+        ));
+    }
+
+    println!("✓ OK");
+
+    // ── Step 2: archive list (snapshot presence) ──────────────────────────
+    let mut list_cmd = Command::new("borg");
+    list_cmd.arg("list")
+            .arg("--json")
+            .arg("--last").arg("1")
+            .arg(&provider.repository);
+
+    inject_borg_credentials(&mut list_cmd, provider);
+
+    let list_out = list_cmd.output().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Failed to run borg list: {}", e),
+        )
+    })?;
+
+    if !list_out.status.success() {
+        let stderr = String::from_utf8_lossy(&list_out.stderr);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("borg list error: {}", stderr.trim()),
+        ));
+    }
+
+    // borg list --json returns { "archives": [ { "name": "...", "time": "..." }, ... ] }
+    let stdout   = String::from_utf8_lossy(&list_out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null);
+
+    let archives = parsed
+        .get("archives")
+        .and_then(|a| a.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    println!("Archives   : {}", archives);
+
+    if archives == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No archives found in repository. Run a backup first, then re-verify.",
+        ));
+    }
+
+    // Report most recent archive
+    if let Some(latest) = parsed
+        .get("archives")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+    {
+        if let Some(name) = latest.get("name").and_then(|n| n.as_str()) {
+            println!("Latest     : {}", name);
+        }
+        if let Some(time) = latest.get("time").and_then(|t| t.as_str()) {
+            // Borg timestamps: "2026-02-23T03:00:01.123456" — trim to seconds
+            let trimmed = if time.len() >= 19 { &time[..19] } else { time };
+            println!("Time       : {}", trimmed.replace('T', " "));
+        }
+    }
+
+    // Model B scaffold: age enforcement lives here when implemented
+    if provider.verify.max_snapshot_age_hours.is_some() || provider.verify.test_restore {
+        println!();
+        println!("{}", "─".repeat(50));
+        if provider.verify.max_snapshot_age_hours.is_some() {
+            println!("⚙  Snapshot age enforcement : not yet implemented (scaffolded for Model B)");
+        }
+        if provider.verify.test_restore {
+            println!("⚙  Test restore             : not yet implemented (scaffolded for Model B)");
+        }
+    }
+
+    println!();
+    println!("Status: PROVIDER OK");
+    Ok(())
+}
+
+/// Inject Borg passphrase credentials into a Command.
+/// Borg uses BORG_PASSPHRASE (env var) or BORG_PASSPHRASE_FD / --passphrase-file.
+/// We map Rehearsa's PasswordSource onto Borg's native env vars to keep it
+/// consistent with how Restic credentials are handled.
+fn inject_borg_credentials(cmd: &mut Command, provider: &ProviderConfig) {
+    match (&provider.password.env, &provider.password.file) {
+        (Some(env_var), _) => {
+            // env_var is the *name* of the variable holding the passphrase.
+            // Read it from the current process environment and set BORG_PASSPHRASE.
+            if let Ok(val) = std::env::var(env_var) {
+                cmd.env("BORG_PASSPHRASE", val);
+            }
+        }
+        (_, Some(file)) => {
+            // Borg doesn't have a direct --passphrase-file flag, but supports
+            // BORG_PASSCOMMAND. We use `cat <file>` as the passcommand.
+            cmd.env("BORG_PASSCOMMAND", format!("cat {}", file));
+        }
+        _ => {
+            // No credentials configured. Borg will use its own environment
+            // fallback (BORG_PASSPHRASE if set externally, or prompt if interactive).
+        }
+    }
 }
 
 // ======================================================

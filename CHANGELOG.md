@@ -4,6 +4,74 @@ All notable changes to Rehearsa are documented here.
 
 ---
 
+## [0.8.0] — Compliance, Contracts, and Coverage
+
+Rehearsa grew up.
+
+Version 0.8.0 is the MSP release. It closes the loop between running rehearsals and proving they happened — with exportable compliance reports, a full baseline audit trail, email notifications, Borg backup support, and a materially smarter preflight. Every feature in this release exists because someone needed to hand evidence to a client, an auditor, or a regulator and say: this infrastructure can recover.
+
+### Added
+
+**Compliance Reports**
+- `rehearsa report` — generate a full compliance report from on-disk rehearsal state
+- JSON output: machine-readable, pipeable, archivable
+- PDF output: paginated document with verdict banner, per-section tables, service score bars, and tamper-evident report ID
+- Report sections: latest rehearsal, history and trend, baseline contract status, policy compliance, preflight findings, provider status
+- `--stack` flag for single-stack reports; omit for fleet-wide (one JSON array, one PDF per stack)
+- `--window` flag to control how many historical runs appear in the trend section
+- `--provider` flag to include named provider status in the report
+- Verdict: `PASS` / `WARN` / `FAIL` derived from confidence, policy, and drift state
+
+**Baseline Promote + History**
+- `rehearsa baseline promote <stack>` — pin any historical run as the new baseline without needing the compose file path
+- `--timestamp` flag for targeted promotion; defaults to latest run; partial timestamp matching supported
+- Baseline history log at `~/.rehearsa/baseline-history/<stack>/` — every `baseline set` and `baseline promote` appends a timestamped snapshot automatically
+- `rehearsa baseline history` — fleet-wide table showing current pinned baseline, drift status, and version count per stack
+- `rehearsa baseline history --stack <stack>` — per-version chronological diff: confidence delta, readiness delta, duration delta, services added/removed between each consecutive version
+- `StackBaseline` gains `pinned_at` (run timestamp) and `promoted_at` (wall clock) fields; fully backward-compatible with existing baseline files
+
+**Email Notifications**
+- Email transport added to the notify channel system — channels now support webhook, email, or both simultaneously
+- `rehearsa notify add-email` — register or update the email transport on a named channel
+- SMTP delivery via `lettre` 0.11 with STARTTLS and rustls — no system dependencies, proper TLS certificate validation
+- Password supplied via literal value or environment variable — credential never required in the registry file
+- Sendgrid scaffolded — API key config stored and validated; delivery deferred
+- All five existing notification events fire over email using the same severity model as webhooks
+- `rehearsa notify show` updated to display full email config alongside webhook config
+- `rehearsa notify list` gains a Transport column: `webhook`, `email (smtp)`, or `webhook + email (smtp)`
+- `rehearsa notify test` fires all configured transports and reports each independently
+
+**Borg Backup Provider**
+- `--kind borg` now accepted by `rehearsa provider add`
+- Supports local paths and SSH remotes (`user@host:path`) — Borg handles SSH natively in the repository string
+- Passphrase via env var (`BORG_PASSPHRASE`) or file (`BORG_PASSCOMMAND=cat <file>`)
+- `rehearsa provider verify` for Borg runs `borg info --json` (reachability) then `borg list --json --last 1` (archive presence)
+- Reports archive count, latest archive name, and timestamp — mirrors the Restic verify output format
+- Model B scaffold (max snapshot age, test restore) carried forward — same pattern as Restic
+
+**Preflight — Environment Variable Rule**
+- New `EnvVarRule` checks every bare-key env entry (entries without `=`) across all services
+- `Critical` finding (−20 points) when a required variable is absent from the restore host
+- `Info` advisory when a variable is present on this host but must also exist on any future restore host
+- `ctx.environment` (host env snapshot) now actively used — was populated but unread in prior versions
+- `Severity::Info` now emitted — was defined but never constructed in prior versions
+- `finding.rule` now printed in preflight output — every finding is attributed to its source rule
+- Bind mount existing-path finding downgraded from `Warning` (−5) to `Info` (−0) — presence on this host is not a problem, portability is the concern
+
+### Changed
+- `NotifyChannel.url` is now `Option<String>` — channels can be email-only, webhook-only, or both; existing webhook-only channels on disk deserialise correctly
+- `StackRunSummary` trimmed to the four fields actually consumed by callers (`readiness`, `confidence`, `policy_violated`, `baseline_drift`); unused fields removed
+- `rehearsa notify list` empty-state message updated to mention both `add` and `add-email`
+
+### Dependencies
+- `printpdf = "0.7"` — PDF generation, pure Rust
+- `lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }` — SMTP delivery
+
+### Philosophy
+> "Prove it. Record it. Hand it over."
+
+---
+
 ## [0.7.0] — Notifications
 
 The daemon can now tell you what happened.

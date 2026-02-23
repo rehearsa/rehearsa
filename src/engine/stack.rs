@@ -114,9 +114,9 @@ pub async fn test_stack(
 
         for finding in &readiness.findings {
             match finding.severity {
-                Severity::Critical => println!("❌ {}", finding.message),
-                Severity::Warning => println!("⚠ {}", finding.message),
-                Severity::Info => println!("ℹ {}", finding.message),
+                Severity::Critical => println!("❌ [{}] {}", finding.rule, finding.message),
+                Severity::Warning  => println!("⚠  [{}] {}", finding.rule, finding.message),
+                Severity::Info     => println!("ℹ  [{}] {}", finding.rule, finding.message),
             }
         }
 

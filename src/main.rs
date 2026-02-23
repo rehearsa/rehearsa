@@ -7,8 +7,10 @@ mod baseline;
 mod daemon;
 mod provider;
 mod notify;
+mod report;
 
 use clap::{Parser, Subcommand};
+use chrono;
 use std::process::exit;
 
 use engine::stack::{test_stack, PullPolicy};
@@ -83,6 +85,28 @@ enum Commands {
     },
     Status,
     Version,
+    /// Generate a compliance report for a stack or the full fleet.
+    Report {
+        /// Stack name. Omit for a fleet-wide report covering all stacks.
+        #[arg(long)]
+        stack: Option<String>,
+
+        /// Output format: json | pdf | both  [default: both]
+        #[arg(long, default_value = "both")]
+        format: String,
+
+        /// Output path or directory. Defaults to stdout (JSON) or ./<stack>-report.pdf (PDF).
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Named backup provider to include in the report.
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Number of historical runs to include in the trend section.
+        #[arg(long, default_value = "10")]
+        window: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -148,6 +172,21 @@ enum BaselineCommands {
     Delete {
         stack: String,
     },
+    /// Promote a historical run to the current baseline.
+    /// Defaults to the latest run if --timestamp is not specified.
+    Promote {
+        stack: String,
+        /// Timestamp of the specific run to promote (partial match supported).
+        /// Run `rehearsa history show <stack>` to list available timestamps.
+        #[arg(long)]
+        timestamp: Option<String>,
+    },
+    /// Show baseline version history.
+    /// Omit --stack to see all stacks; provide --stack for per-version diffs.
+    History {
+        #[arg(long)]
+        stack: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,6 +247,44 @@ enum NotifyCommands {
     /// Send a test notification to verify delivery
     Test {
         name: String,
+    },
+    /// Add or update the email transport on a channel
+    AddEmail {
+        /// Channel name (creates the channel if it doesn't exist)
+        name: String,
+        /// Email provider: smtp | sendgrid  [default: smtp]
+        #[arg(long, default_value = "smtp")]
+        provider: String,
+        /// From address, e.g. "Rehearsa <alerts@example.com>"
+        #[arg(long)]
+        from: String,
+        /// Recipient address (repeatable: --to a@b.com --to c@d.com)
+        #[arg(long, required = true)]
+        to: Vec<String>,
+        /// SMTP server hostname
+        #[arg(long)]
+        smtp_host: Option<String>,
+        /// SMTP server port [default: 587]
+        #[arg(long)]
+        smtp_port: Option<u16>,
+        /// SMTP username
+        #[arg(long)]
+        smtp_username: Option<String>,
+        /// SMTP password (literal). Prefer --smtp-password-env in production.
+        #[arg(long)]
+        smtp_password: Option<String>,
+        /// Environment variable holding the SMTP password
+        #[arg(long)]
+        smtp_password_env: Option<String>,
+        /// Disable STARTTLS (not recommended; for local relays only)
+        #[arg(long, default_value_t = true)]
+        smtp_starttls: bool,
+        /// Sendgrid API key (literal). Prefer --sendgrid-api-key-env.
+        #[arg(long)]
+        sendgrid_api_key: Option<String>,
+        /// Environment variable holding the Sendgrid API key
+        #[arg(long)]
+        sendgrid_api_key_env: Option<String>,
     },
 }
 
@@ -398,6 +475,8 @@ async fn main() {
                         expected_readiness: latest.readiness,
                         expected_duration: latest.duration_seconds,
                         service_scores: latest.services,
+                        pinned_at: Some(latest.timestamp.clone()),
+                        promoted_at: Some(chrono::Utc::now().to_rfc3339()),
                     };
 
                     if let Err(e) = save_baseline(&stack_name, &baseline) {
@@ -551,6 +630,24 @@ async fn main() {
                 }
                 println!("Baseline deleted for '{}'", stack);
             }
+
+            BaselineCommands::Promote { stack, timestamp } => {
+                if let Err(e) = baseline::promote_baseline(&stack, timestamp.as_deref()) {
+                    eprintln!("Baseline error: {}", e);
+                    exit(1);
+                }
+            }
+
+            BaselineCommands::History { stack } => {
+                let result = match stack {
+                    Some(ref s) => baseline::show_stack_baseline_history(s),
+                    None        => baseline::show_all_baseline_history(),
+                };
+                if let Err(e) = result {
+                    eprintln!("Baseline error: {}", e);
+                    exit(1);
+                }
+            }
         },
 
         // ==================================================
@@ -670,6 +767,36 @@ async fn main() {
                     exit(1);
                 }
             }
+
+            NotifyCommands::AddEmail {
+                name, provider, from, to,
+                smtp_host, smtp_port, smtp_username,
+                smtp_password, smtp_password_env, smtp_starttls,
+                sendgrid_api_key, sendgrid_api_key_env,
+            } => {
+                let email_provider = match provider.as_str() {
+                    "sendgrid" => notify::EmailProvider::Sendgrid,
+                    _          => notify::EmailProvider::Smtp,
+                };
+
+                if let Err(e) = notify::add_email_channel(
+                    &name,
+                    email_provider,
+                    &from,
+                    to,
+                    smtp_host.as_deref(),
+                    smtp_port,
+                    smtp_username.as_deref(),
+                    smtp_password.as_deref(),
+                    smtp_password_env.as_deref(),
+                    smtp_starttls,
+                    sendgrid_api_key.as_deref(),
+                    sendgrid_api_key_env.as_deref(),
+                ) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
         },
 
         // ==================================================
@@ -722,6 +849,31 @@ async fn main() {
         Commands::Status => {
             if let Err(e) = history::status_all() {
                 eprintln!("Status error: {}", e);
+                exit(1);
+            }
+        }
+
+        // ==================================================
+        // REPORT
+        // ==================================================
+
+        Commands::Report { stack, format, output, provider, window } => {
+            let fmt = match format.as_str() {
+                "json" => report::ReportFormat::Json,
+                "pdf"  => report::ReportFormat::Pdf,
+                _      => report::ReportFormat::Both,
+            };
+
+            let args = report::ReportArgs {
+                stack,
+                format: fmt,
+                output,
+                provider,
+                window,
+            };
+
+            if let Err(e) = report::run_report(&args) {
+                eprintln!("Error: {}", e);
                 exit(1);
             }
         }
