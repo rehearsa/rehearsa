@@ -26,6 +26,7 @@ pub struct Service {
     pub volumes: Option<Vec<String>>,
 
     pub depends_on: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_command")]
     pub command: Option<Vec<String>>,
 
     // ✅ NEW: Healthcheck support
@@ -90,14 +91,43 @@ where
             M: MapAccess<'de>,
         {
             let mut env = Vec::new();
-            while let Some((key, value)) =
-                map.next_entry::<String, String>()?
-            {
-                env.push(format!("{}={}", key, value));
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "<<" {
+                    let _ = map.next_value::<serde_yaml::Value>()?;
+                    continue;
+                }
+                match map.next_value::<serde_yaml::Value>()? {
+                    serde_yaml::Value::String(s) => env.push(format!("{}={}", key, s)),
+                    serde_yaml::Value::Number(n) => env.push(format!("{}={}", key, n)),
+                    serde_yaml::Value::Bool(b) => env.push(format!("{}={}", key, b)),
+                    serde_yaml::Value::Null => {}
+                    _ => {}
+                }
             }
             Ok(Some(env))
         }
     }
 
     deserializer.deserialize_any(EnvVisitor)
+}
+
+fn deserialize_command<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = serde_yaml::Value::deserialize(deserializer)?;
+    match val {
+        serde_yaml::Value::Null => Ok(None),
+        serde_yaml::Value::String(s) => Ok(Some(vec![s])),
+        serde_yaml::Value::Sequence(seq) => {
+            let mut out = Vec::new();
+            for v in seq {
+                if let serde_yaml::Value::String(s) = v {
+                    out.push(s);
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
 }
