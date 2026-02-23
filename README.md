@@ -10,6 +10,14 @@ It doesn't check whether your backup ran. It proves whether your infrastructure 
 
 ---
 
+## Stability Guarantee
+
+Rehearsa 1.0.0 declares a stable interface.
+
+The CLI command surface, exit codes, on-disk file formats, contract semantics, and report structure will not change without a major version increment. You can build automation, scripts, and integrations around Rehearsa without fear of breakage.
+
+---
+
 ## Why Rehearsa Exists
 
 Most self-hosters run automated backups. Almost nobody tests restores.

@@ -4,6 +4,95 @@ All notable changes to Rehearsa are documented here.
 
 ---
 
+## [1.0.0] — Stable Release
+
+Rehearsa proves recoverability against a declared contract. Everything else is support machinery.
+
+1.0.0 is not a feature release. It is a stability declaration. Every system is in place. The contract model is proven against real infrastructure. The CLI surface is frozen. The schemas are versioned. The daemon runs continuously on hardware from a Raspberry Pi to a modern server. The tool does what it says on the tin — and it will keep doing exactly that.
+
+### Stable Interface Declaration
+
+The following are guaranteed stable from 1.0.0 forward. Breaking changes require a major version increment:
+
+- **CLI command surface** — all subcommands, flags, and argument names
+- **Exit codes** — 0 (pass), 2 (low confidence), 3 (critical), 4 (policy violation), 5 (baseline drift)
+- **On-disk file formats** — RunRecord, StackBaseline, WatchRegistry, DaemonConfig (schema_version field guarantees forward detection)
+- **Contract semantics** — CONTRACT HONOURED / DRIFT DETECTED verdicts and their conditions
+- **JSON output** — `--json` flag output structure for all commands
+- **Report format** — ComplianceReport JSON schema and PDF section structure
+- **Provider verification model** — Model B verify contract for Restic and Borg
+
+### What shipped across the 0.x series
+
+The full journey from 0.1.0 to 1.0.0:
+
+- **0.1.0** — Restore simulation engine. Isolated network, healthcheck scoring, tamper-evident history.
+- **0.2.0** — Policy enforcement. Preflight readiness. CI exit codes.
+- **0.3.0** — Restore contract engine. Baseline pinning, drift detection.
+- **0.4.0** — Daemon mode. Systemd service, file watching.
+- **0.5.0** — Scheduled rehearsals. Per-stack cron expressions.
+- **0.6.0** — Backup provider hooks. Restic integration, persistent scheduler.
+- **0.7.0** — Notifications. Webhook and email, five event types.
+- **0.8.0** — Compliance reports. PDF + JSON, baseline audit trail, Borg support.
+- **0.8.1** — Compose compatibility. Two-layer tolerant parser.
+- **0.9.0** — Full compatibility. 21-stack production validation, ExternalNetworkRule, oneshot scoring, auto-init.
+- **0.9.1** — Coverage command. Schema versioning. Pre-built binaries.
+- **0.9.2** — Concurrency control. CPU spike fix. Three-tier configuration.
+- **1.0.0** — Stable release. Docker image. Portainer deploy. Stability guarantee.
+
+### Added
+
+**Docker image**
+- `ghcr.io/rehearsa/rehearsa:latest` — multi-arch image (amd64 + arm64)
+- Single-stack Compose deploy for Portainer and Docker Compose environments
+- `REHEARSA_MAX_CONCURRENT` environment variable works in container context
+- Config and history volumes clearly defined
+
+**GitHub Actions**
+- Release workflow: pre-built binaries for x86_64 and aarch64 on every tag
+- Docker workflow: multi-arch image published to GHCR on every tag
+
+**Documentation**
+- Getting started guide — written for a stranger; zero to contracted fleet in 15 minutes
+- Stability guarantee declared in README
+- All commands documented including coverage, concurrency, and config
+
+### Philosophy
+> "Rehearsa proves recoverability against a declared contract. Everything else is support machinery."
+
+---
+
+## [0.9.2] — Concurrency Control
+
+Rehearsa is now safe to run on any hardware.
+
+Before this release, a large fleet with a shared nightly schedule would fire all rehearsals simultaneously — pinning the CPU on low-power machines. 0.9.2 introduces a concurrency limit that queues rehearsals and runs them one at a time by default, with a clean upgrade path for more capable hardware.
+
+### Added
+
+**Rehearsal Concurrency Limit**
+- Maximum simultaneous rehearsals now defaults to 1 — safe for Raspberry Pi, old i3/i5, and any ARM single-board computer
+- `tokio::sync::Semaphore` shared between the scheduler and file watcher — both triggers respect the same limit
+- Rehearsals that would exceed the limit queue and run as slots become available — no rehearsal is dropped or skipped
+
+**Three-Tier Configuration**
+- `REHEARSA_MAX_CONCURRENT` environment variable — highest priority; works in Docker Compose deployments
+- `/etc/rehearsa/config.json` — persisted config for bare-metal installs
+- Built-in default of 1 — safe fallback requiring no configuration
+
+**New Commands**
+- `rehearsa daemon set-concurrency <n>` — set the limit via CLI; persists to `/etc/rehearsa/config.json`; prompts to restart the daemon
+- `rehearsa daemon config` — show current configuration and resolved values with source attribution (env var / config file / default)
+
+**Daemon startup log**
+- Concurrency limit is logged on daemon start: `Concurrency limit: 1 simultaneous rehearsal(s)`
+- Source is always visible via `rehearsa daemon config`
+
+### Philosophy
+> "A tool that works on your homelab should work on the cheapest hardware in the field."
+
+---
+
 ## [0.9.1] — Coverage + Schema Hardening
 
 The final release before 1.0.

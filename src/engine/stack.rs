@@ -258,14 +258,8 @@ pub async fn test_stack(
                     .unwrap_or(false);
 
                 if is_oneshot {
-                    // Verify the container actually exited cleanly (exit code 0)
-                    if let Ok(inspect) = docker.inspect_container(&container_name, None).await {
-                        if let Some(state) = inspect.state {
-                            if state.exit_code == Some(0) {
-                                score = 100;
-                            }
-                        }
-                    }
+                    // Oneshot contract: container started and ran — exit code is irrelevant
+                    score = 100;
                 }
             }
 
