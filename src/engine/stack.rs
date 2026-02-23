@@ -55,6 +55,8 @@ pub struct StackRunSummary {
     pub duration: u64,
     pub risk: String,
     pub service_scores: HashMap<String, u32>,
+    pub policy_violated: bool,
+    pub baseline_drift: bool,
 }
 
 // ======================================================
@@ -473,6 +475,8 @@ let summary = StackRunSummary {
     duration,
     risk: risk.to_string(),
     service_scores: service_scores.clone(),
+    policy_violated: policy_violation,
+    baseline_drift: baseline_drift_detected,
 };
 
 let record = RunRecord {
@@ -488,10 +492,6 @@ let record = RunRecord {
 };
 
 let _ = persist(&record);
-
-if exit_code != 0 {
-    std::process::exit(exit_code);
-}
 
 Ok(summary)
 }

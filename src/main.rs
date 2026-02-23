@@ -5,6 +5,8 @@ mod history;
 mod policy;
 mod baseline;
 mod daemon;
+mod provider;
+mod notify;
 
 use clap::{Parser, Subcommand};
 use std::process::exit;
@@ -70,6 +72,14 @@ enum Commands {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
+    },
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommands,
     },
     Status,
     Version,
@@ -155,11 +165,89 @@ enum DaemonCommands {
         /// Run a rehearsal on daemon start if a scheduled window was missed
         #[arg(long, default_value_t = false)]
         catch_up: bool,
+        /// Named backup provider to associate with this stack (see: rehearsa provider list)
+        #[arg(long)]
+        provider: Option<String>,
+        /// Named notify channel override for this stack (see: rehearsa notify list)
+        #[arg(long)]
+        notify: Option<String>,
     },
     Unwatch {
         stack: String,
     },
     List,
+}
+
+#[derive(Subcommand)]
+enum NotifyCommands {
+    /// Register a new webhook notification channel
+    Add {
+        /// Unique name for this channel (e.g. slack-ops, discord-alerts)
+        name: String,
+        /// Webhook URL to POST notifications to
+        #[arg(long)]
+        url: String,
+        /// Optional secret sent as X-Rehearsa-Secret header
+        #[arg(long)]
+        secret: Option<String>,
+    },
+    /// Show config for a notify channel
+    Show {
+        name: String,
+    },
+    /// List all registered notify channels
+    List,
+    /// Remove a notify channel
+    Delete {
+        name: String,
+    },
+    /// Set the global default notify channel
+    Default {
+        name: String,
+    },
+    /// Send a test notification to verify delivery
+    Test {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProviderCommands {
+    /// Register a new backup provider
+    Add {
+        /// Unique name for this provider (e.g. restic-main, client-a-restic)
+        name: String,
+
+        /// Provider type. Supported: restic
+        #[arg(long)]
+        kind: String,
+
+        /// Repository path or URI (e.g. /mnt/backups or s3:bucket/path)
+        #[arg(long)]
+        repo: String,
+
+        /// Environment variable that holds the repository password
+        #[arg(long)]
+        password_env: Option<String>,
+
+        /// Path to a file containing the repository password
+        #[arg(long)]
+        password_file: Option<String>,
+    },
+    /// Show full config for a provider
+    Show {
+        name: String,
+    },
+    /// List all registered providers
+    List,
+    /// Remove a provider
+    Delete {
+        name: String,
+    },
+    /// Verify a provider's repository is reachable and has snapshots
+    Verify {
+        name: String,
+    },
 }
 
 // ======================================================
@@ -194,7 +282,17 @@ async fn main() {
                     cli.strict_integrity,
                     pull_policy,
                 ).await {
-                    Ok(_) => {}
+                    Ok(summary) => {
+                        if summary.policy_violated {
+                            exit(4);
+                        } else if summary.baseline_drift {
+                            exit(5);
+                        } else if summary.confidence < 40 {
+                            exit(3);
+                        } else if summary.confidence < 70 {
+                            exit(2);
+                        }
+                    }
                     Err(e) => {
                         if json_mode {
                             println!(
@@ -484,8 +582,35 @@ async fn main() {
                     exit(1);
                 }
             }
-            DaemonCommands::Watch { stack, compose_file, schedule, catch_up } => {
-                if let Err(e) = daemon::add_watch(&stack, &compose_file, schedule.as_deref(), catch_up) {
+            DaemonCommands::Watch { stack, compose_file, schedule, catch_up, provider, notify } => {
+                // Validate the provider name exists before registering the watch
+                if let Some(ref pname) = provider {
+                    if provider::load_provider(pname).is_none() {
+                        eprintln!(
+                            "Provider '{}' not found. Register it first with: rehearsa provider add {}",
+                            pname, pname
+                        );
+                        exit(1);
+                    }
+                }
+                // Validate the notify channel exists before registering the watch
+                if let Some(ref nchan) = notify {
+                    if notify::resolve_channel(Some(nchan)).is_none() {
+                        eprintln!(
+                            "Notify channel '{}' not found. Register it first with: rehearsa notify add {}",
+                            nchan, nchan
+                        );
+                        exit(1);
+                    }
+                }
+                if let Err(e) = daemon::add_watch(
+                    &stack,
+                    &compose_file,
+                    schedule.as_deref(),
+                    catch_up,
+                    provider.as_deref(),
+                    notify.as_deref(),
+                ) {
                     eprintln!("Daemon error: {}", e);
                     exit(1);
                 }
@@ -499,6 +624,92 @@ async fn main() {
             DaemonCommands::List => {
                 if let Err(e) = daemon::list_watches() {
                     eprintln!("Daemon error: {}", e);
+                    exit(1);
+                }
+            }
+        },
+
+        // ==================================================
+        // NOTIFY
+        // ==================================================
+
+        Commands::Notify { command } => match command {
+            NotifyCommands::Add { name, url, secret } => {
+                if let Err(e) = notify::add_channel(&name, &url, secret.as_deref()) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+            NotifyCommands::Show { name } => {
+                if let Err(e) = notify::show_channel(&name) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+            NotifyCommands::List => {
+                if let Err(e) = notify::list_channels() {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+            NotifyCommands::Delete { name } => {
+                if let Err(e) = notify::delete_channel(&name) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+            NotifyCommands::Default { name } => {
+                if let Err(e) = notify::set_default(&name) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+            NotifyCommands::Test { name } => {
+                if let Err(e) = notify::test_channel(&name) {
+                    eprintln!("Notify error: {}", e);
+                    exit(1);
+                }
+            }
+        },
+
+        // ==================================================
+        // PROVIDER
+        // ==================================================
+
+        Commands::Provider { command } => match command {
+            ProviderCommands::Add { name, kind, repo, password_env, password_file } => {
+                if let Err(e) = provider::add_provider(
+                    &name,
+                    &kind,
+                    &repo,
+                    password_env.as_deref(),
+                    password_file.as_deref(),
+                ) {
+                    eprintln!("Provider error: {}", e);
+                    exit(1);
+                }
+            }
+            ProviderCommands::Show { name } => {
+                if let Err(e) = provider::show_provider(&name) {
+                    eprintln!("Provider error: {}", e);
+                    exit(1);
+                }
+            }
+            ProviderCommands::List => {
+                if let Err(e) = provider::list_providers() {
+                    eprintln!("Provider error: {}", e);
+                    exit(1);
+                }
+            }
+            ProviderCommands::Delete { name } => {
+                if let Err(e) = provider::delete_provider(&name) {
+                    eprintln!("Provider error: {}", e);
+                    exit(1);
+                }
+            }
+            ProviderCommands::Verify { name } => {
+                if let Err(e) = provider::verify_provider(&name) {
+                    eprintln!("Provider error: {}", e);
                     exit(1);
                 }
             }

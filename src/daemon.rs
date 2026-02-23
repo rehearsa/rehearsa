@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,6 +20,14 @@ pub struct WatchEntry {
     /// If true, run immediately on daemon start if a scheduled run was missed. Defaults false.
     #[serde(default)]
     pub catch_up: bool,
+    /// Optional named backup provider to verify before each rehearsal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Optional named notify channel override for this stack.
+    /// If absent, the global default channel is used (if configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -73,7 +82,14 @@ pub fn save_registry(registry: &WatchRegistry) -> Result<(), String> {
         .map_err(|e| format!("Failed to write watches: {}\nTry running with sudo.", e))
 }
 
-pub fn add_watch(stack: &str, compose_path: &str, schedule: Option<&str>, catch_up: bool) -> Result<(), String> {
+pub fn add_watch(
+    stack: &str,
+    compose_path: &str,
+    schedule: Option<&str>,
+    catch_up: bool,
+    provider: Option<&str>,
+    notify: Option<&str>,
+) -> Result<(), String> {
     use std::str::FromStr;
 
     let mut registry = load_registry()?;
@@ -99,12 +115,20 @@ pub fn add_watch(stack: &str, compose_path: &str, schedule: Option<&str>, catch_
         added: Utc::now().to_rfc3339(),
         schedule: schedule.map(|s| s.to_string()),
         catch_up,
+        provider: provider.map(|s| s.to_string()),
+        notify: notify.map(|s| s.to_string()),
     });
 
     save_registry(&registry)?;
     println!("Watching '{}' at {}", stack, abs_path.display());
     if let Some(expr) = schedule {
         println!("Schedule : {}", expr);
+    }
+    if let Some(pname) = provider {
+        println!("Provider : {}", pname);
+    }
+    if let Some(nchan) = notify {
+        println!("Notify   : {}", nchan);
     }
     Ok(())
 }
@@ -130,12 +154,14 @@ pub fn list_watches() -> Result<(), String> {
     }
 
     println!("Watched Stacks");
-    println!("{}", "─".repeat(80));
-    println!("{:<20} {:<30} {}", "Stack", "Compose Path", "Schedule");
-    println!("{}", "─".repeat(80));
+    println!("{}", "─".repeat(110));
+    println!("{:<20} {:<30} {:<16} {:<20} {}", "Stack", "Compose Path", "Schedule", "Provider", "Notify");
+    println!("{}", "─".repeat(110));
     for w in &registry.watches {
         let schedule = w.schedule.as_deref().unwrap_or("—");
-        println!("{:<20} {:<30} {}", w.stack, w.compose_path, schedule);
+        let provider = w.provider.as_deref().unwrap_or("—");
+        let notify   = w.notify.as_deref().unwrap_or("—");
+        println!("{:<20} {:<30} {:<16} {:<20} {}", w.stack, w.compose_path, schedule, provider, notify);
     }
     Ok(())
 }
@@ -262,7 +288,8 @@ pub async fn run_daemon() -> Result<(), String> {
     println!("Watching {} stack(s):", registry.watches.len());
     for w in &registry.watches {
         let sched = w.schedule.as_deref().unwrap_or("no schedule");
-        println!("  {} → {}  [{}]", w.stack, w.compose_path, sched);
+        let prov  = w.provider.as_deref().unwrap_or("no provider");
+        println!("  {} → {}  [{}]  [{}]", w.stack, w.compose_path, sched, prov);
     }
 
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
@@ -302,7 +329,12 @@ pub async fn run_daemon() -> Result<(), String> {
                                     Utc::now().to_rfc3339(),
                                     watch.stack
                                 );
-                                trigger_rehearsal(&watch.stack, &watch.compose_path).await;
+                                trigger_rehearsal(
+                                    &watch.stack,
+                                    &watch.compose_path,
+                                    watch.provider.as_deref(),
+                                    watch.notify.as_deref(),
+                                ).await;
                             }
                         }
                     }
@@ -329,17 +361,50 @@ pub async fn run_daemon() -> Result<(), String> {
 // CRON SCHEDULER
 // ======================================================
 
+const SCHEDULER_STATE_PATH: &str = "/etc/rehearsa/scheduler_state.json";
+
+/// Load persisted last_run map from disk. Returns empty map if file is absent or unreadable.
+fn load_scheduler_state() -> HashMap<String, chrono::DateTime<Utc>> {
+    let raw = match fs::read_to_string(SCHEDULER_STATE_PATH) {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// Persist the last_run map to disk. Logs on failure but never panics —
+/// a write failure is not worth crashing the daemon over.
+fn save_scheduler_state(last_run: &HashMap<String, chrono::DateTime<Utc>>) {
+    let raw = match serde_json::to_string_pretty(last_run) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Scheduler: failed to serialize state: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = fs::write(SCHEDULER_STATE_PATH, raw) {
+        eprintln!("Scheduler: failed to write state to {}: {}", SCHEDULER_STATE_PATH, e);
+    }
+}
+
 /// Runs in a background task. Every 30 seconds it re-reads the registry,
 /// checks whether any scheduled stack is due, and fires trigger_rehearsal.
-/// Last-run times are tracked in memory — missed runs while the daemon was
-/// down are skipped (catch_up defaults false).
+/// Last-run times are persisted to disk so catch_up works correctly across
+/// daemon restarts.
 async fn run_scheduler() {
     use std::str::FromStr;
-    use std::collections::HashMap;
     use tokio::time::Duration;
 
-    // Map of stack name → last time a scheduled rehearsal was fired
-    let mut last_run: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
+    // Load persisted state — survives daemon restarts
+    let mut last_run = load_scheduler_state();
+
+    if !last_run.is_empty() {
+        println!(
+            "[{}] Scheduler: loaded last_run state for {} stack(s)",
+            Utc::now().to_rfc3339(),
+            last_run.len()
+        );
+    }
 
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -390,15 +455,37 @@ async fn run_scheduler() {
                 if prev >= last_fire {
                     continue; // already fired this window
                 }
+
+                // A window was missed while the daemon was down.
+                // If catch_up is false, record the slot and skip silently.
+                if !watch.catch_up {
+                    last_run.insert(watch.stack.clone(), last_fire);
+                    save_scheduler_state(&last_run);
+                    continue;
+                }
+
+                println!(
+                    "[{}] Scheduler: catch_up triggered for '{}' (missed slot: {})",
+                    now.to_rfc3339(),
+                    watch.stack,
+                    last_fire.to_rfc3339()
+                );
             }
 
-            // Record and fire
+            // Record, persist, and fire
             last_run.insert(watch.stack.clone(), last_fire);
+            save_scheduler_state(&last_run);
+
             println!(
                 "[{}] Scheduler: running rehearsal for '{}' (schedule: {})",
                 now.to_rfc3339(), watch.stack, expr
             );
-            trigger_rehearsal(&watch.stack, &watch.compose_path).await;
+            trigger_rehearsal(
+                &watch.stack,
+                &watch.compose_path,
+                watch.provider.as_deref(),
+                watch.notify.as_deref(),
+            ).await;
         }
     }
 }
@@ -407,8 +494,33 @@ async fn run_scheduler() {
 // REHEARSAL TRIGGER
 // ======================================================
 
-async fn trigger_rehearsal(stack: &str, compose_path: &str) {
+async fn trigger_rehearsal(
+    stack: &str,
+    compose_path: &str,
+    provider: Option<&str>,
+    notify_channel: Option<&str>,
+) {
     use crate::engine::stack::{test_stack, PullPolicy};
+    use crate::provider::verify_provider;
+    use crate::notify::{notify, NotifyEvent};
+
+    // Provider verification — critical gate before rehearsal
+    if let Some(pname) = provider {
+        println!(
+            "[{}] Verifying provider '{}' before rehearsal for '{}'",
+            Utc::now().to_rfc3339(), pname, stack
+        );
+        if let Err(e) = verify_provider(pname) {
+            let msg = format!("Provider '{}' verification failed: {}", pname, e);
+            eprintln!("[{}] {} — skipping rehearsal for '{}'", Utc::now().to_rfc3339(), msg, stack);
+            notify(stack, NotifyEvent::ProviderVerificationFailed, &msg, notify_channel);
+            return;
+        }
+        println!(
+            "[{}] Provider '{}' OK — proceeding with rehearsal for '{}'",
+            Utc::now().to_rfc3339(), pname, stack
+        );
+    }
 
     println!("[{}] Starting rehearsal for '{}'", Utc::now().to_rfc3339(), stack);
 
@@ -420,14 +532,32 @@ async fn trigger_rehearsal(stack: &str, compose_path: &str) {
         false,
         PullPolicy::IfMissing,
     ).await {
-        Ok(_) => println!(
-            "[{}] Rehearsal complete for '{}'",
-            Utc::now().to_rfc3339(), stack
-        ),
-        Err(e) => eprintln!(
-            "[{}] Rehearsal failed for '{}': {}",
-            Utc::now().to_rfc3339(), stack, e
-        ),
+        Ok(summary) => {
+            println!("[{}] Rehearsal complete for '{}'", Utc::now().to_rfc3339(), stack);
+
+            if summary.policy_violated {
+                let msg = format!(
+                    "Policy violation: confidence {}%, readiness {}%",
+                    summary.confidence, summary.readiness
+                );
+                notify(stack, NotifyEvent::PolicyViolation, &msg, notify_channel);
+            } else if summary.baseline_drift {
+                let msg = "Restore contract drift detected against pinned baseline.".to_owned();
+                notify(stack, NotifyEvent::BaselineDrift, &msg, notify_channel);
+            } else {
+                notify(
+                    stack,
+                    NotifyEvent::RehearsalRecovered,
+                    "Rehearsal passed. Restore contract honoured.",
+                    notify_channel,
+                );
+            }
+        }
+        Err(e) => {
+            let msg = format!("Rehearsal failed: {}", e);
+            eprintln!("[{}] {} for '{}'", Utc::now().to_rfc3339(), msg, stack);
+            notify(stack, NotifyEvent::RehearsalFatalError, &msg, notify_channel);
+        }
     }
 }
 

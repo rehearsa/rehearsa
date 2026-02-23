@@ -2,8 +2,8 @@
 
 > **Backups are hope. Rehearsa is proof.**
 
-Rehearsa is a restore contract engine for Docker-based self-hosted environments.
-It validates that your docker-compose stacks can actually restore and boot correctly — before disaster happens.
+Rehearsa is a deterministic restore contract engine for Docker-based self-hosted infrastructure.
+It proves your stacks can actually recover to a declared standard — automatically, continuously, and with tamper-evident evidence.
 
 ![Rehearsa Status](docs/status.png)
 
@@ -22,7 +22,7 @@ When disaster strikes:
 
 A backup succeeding does not mean a restore will succeed.
 
-Rehearsa exists to close that gap — and prove you can recover.
+Rehearsa exists to close that gap — not just once, but continuously, with a pinned contract you can prove hasn't drifted.
 
 ---
 
@@ -36,7 +36,10 @@ rehearsa --timeout 120 stack test docker-compose.yml
 rehearsa status
 
 # Pin a restore contract baseline
-rehearsa baseline set mystack
+rehearsa baseline set docker-compose.yml
+
+# Check for drift against your contract
+rehearsa baseline diff mystack
 
 # Test with failure injection
 rehearsa --inject-failure myservice stack test docker-compose.yml
@@ -56,7 +59,9 @@ Rehearsa performs a controlled restore simulation based on a docker-compose file
 - Waits for container health and runtime state
 - Scores each service and calculates confidence, risk, and stability
 - Detects drift against a declared restore contract (baseline)
+- Verifies backup provider health before rehearsing
 - Enforces policy and exits deterministically
+- Fires webhook notifications on violations, drift, or recovery
 - Cleans up everything — containers and network
 
 **No changes are made to your live stack.**
@@ -115,7 +120,7 @@ Stack confidence is the average of all service scores, aggregated into a risk ba
 Pin a restore contract for any stack:
 
 ```bash
-rehearsa baseline set mystack
+rehearsa baseline set docker-compose.yml
 ```
 
 Future runs are measured against this contract. If the stack drifts — new services, missing services, confidence drop, readiness drop, duration spike — Rehearsa detects and reports it.
@@ -155,10 +160,11 @@ Policy violations produce deterministic exit codes — making Rehearsa fully CI/
 | Code | Meaning |
 |---|---|
 | 0 | Pass |
-| 1 | Confidence below threshold |
-| 2 | Regression detected |
-| 3 | Critical failure |
-| 4 | Baseline drift detected |
+| 1 | Fatal error |
+| 2 | Moderate confidence (70–89%) |
+| 3 | Critical confidence (<40%) |
+| 4 | Policy violation |
+| 5 | Baseline drift |
 
 ---
 
@@ -177,6 +183,91 @@ jobs:
       - name: Run restore rehearsal
         run: rehearsa --fail-below 80 --fail-on-regression stack test docker-compose.yml
 ```
+
+---
+
+## Daemon Mode
+
+Run Rehearsa as a systemd service for continuous, automated rehearsals:
+
+```bash
+# Install and start the daemon
+sudo rehearsa daemon install
+
+# Watch a stack — rehearse on Compose file change
+rehearsa daemon watch mystack docker-compose.yml
+
+# Watch with a cron schedule
+rehearsa daemon watch mystack docker-compose.yml --schedule "0 3 * * *"
+
+# Watch with a backup provider and notification channel
+rehearsa daemon watch mystack docker-compose.yml \
+  --schedule "0 3 * * *" \
+  --provider restic-main \
+  --notify slack-ops
+
+# List watched stacks
+rehearsa daemon list
+
+# View logs
+journalctl -u rehearsa -f
+```
+
+Scheduled run history persists across daemon restarts. Stacks registered with `--catch-up` will fire immediately on restart if a scheduled window was missed.
+
+---
+
+## Backup Provider Hooks
+
+Verify your backup repository is healthy before each rehearsal:
+
+```bash
+# Register a Restic repository
+rehearsa provider add restic-main \
+  --kind restic \
+  --repo /mnt/backups/restic \
+  --password-env RESTIC_PASSWORD
+
+# Verify it's reachable and has snapshots
+rehearsa provider verify restic-main
+
+# List all providers
+rehearsa provider list
+```
+
+When a provider is attached to a daemon watch, Rehearsa verifies the repository and confirms at least one snapshot exists before running the rehearsal. A failed provider blocks the run and fires a notification.
+
+---
+
+## Notifications
+
+Get alerted when things go wrong — or when they recover:
+
+```bash
+# Register a webhook channel (Slack, Discord, ntfy, Gotify, any HTTP endpoint)
+rehearsa notify add slack-ops --url https://hooks.slack.com/services/...
+
+# Set as the global default for all stacks
+rehearsa notify default slack-ops
+
+# Send a test notification to verify delivery
+rehearsa notify test slack-ops
+
+# Per-stack channel override
+rehearsa daemon watch mystack docker-compose.yml --notify client-a-slack
+```
+
+**Notification events:**
+
+| Severity | Event |
+|---|---|
+| 🔴 Critical | Rehearsal fatal error |
+| 🔴 Critical | Provider verification failed |
+| 🟡 Warning | Policy violation |
+| 🟡 Warning | Baseline drift detected |
+| 🟢 Recovery | Rehearsal recovered (back to passing) |
+
+Payloads are JSON-formatted webhooks. An optional `X-Rehearsa-Secret` header is supported for receiver validation.
 
 ---
 
@@ -206,6 +297,53 @@ Stack: mystack
 
 ---
 
+## Full Command Reference
+
+```
+rehearsa stack test <compose-file>
+
+rehearsa baseline set <compose-file>
+rehearsa baseline show <stack>
+rehearsa baseline diff <stack>
+rehearsa baseline delete <stack>
+
+rehearsa policy set <stack> [--min-confidence N] [--min-readiness N]
+                            [--block-on-regression bool] [--fail-on-baseline-drift bool]
+                            [--fail-on-duration-spike bool] [--duration-spike-percent N]
+rehearsa policy show <stack>
+rehearsa policy delete <stack>
+
+rehearsa history list
+rehearsa history show <stack>
+
+rehearsa provider add <n> --kind restic --repo <path> [--password-env VAR | --password-file PATH]
+rehearsa provider show <n>
+rehearsa provider list
+rehearsa provider delete <n>
+rehearsa provider verify <n>
+
+rehearsa notify add <n> --url <webhook-url> [--secret KEY]
+rehearsa notify show <n>
+rehearsa notify list
+rehearsa notify delete <n>
+rehearsa notify default <n>
+rehearsa notify test <n>
+
+rehearsa daemon install
+rehearsa daemon uninstall
+rehearsa daemon status
+rehearsa daemon run
+rehearsa daemon watch <stack> <compose-file> [--schedule CRON] [--catch-up]
+                                             [--provider NAME] [--notify NAME]
+rehearsa daemon unwatch <stack>
+rehearsa daemon list
+
+rehearsa status
+rehearsa version
+```
+
+---
+
 ## Design Goals
 
 - Agentless — Docker socket only
@@ -214,6 +352,8 @@ Stack: mystack
 - Deterministic cleanup and exit codes
 - Explicit baseline contracts — no silent mutation
 - Tamper-evident audit history
+- Backup provider verification before rehearsal
+- Webhook notifications with severity and recovery events
 - CI-friendly by default
 - Single static binary — no runtime dependencies
 - Written in Rust
@@ -238,19 +378,22 @@ It does one thing: **prove your infrastructure can recover to a declared standar
 | 0.1.0 | Restore Simulation Engine |
 | 0.2.0 | Restore Validation + Policy Enforcement |
 | 0.3.0 | Restore Contract Engine |
+| 0.4.0 | Daemon Mode + File Watching |
+| 0.5.0 | Scheduled Rehearsals |
+| 0.6.0 | Backup Provider Hooks + Persistent Scheduler |
+| 0.7.0 | Notifications |
 
 ---
 
 ## Roadmap
 
-- [ ] `baseline diff` — show exact contract drift
-- [ ] `baseline promote` — promote latest successful run
-- [ ] `baseline history` — contract change audit trail
-- [ ] `baseline lock` — read-only contract protection
-- [ ] Exportable compliance reports
-- [ ] Backup provider hooks (Restic, Borg)
-- [ ] Scheduled automated rehearsals
-- [ ] Cross-host restore simulation
+- [ ] Exportable compliance report (PDF/JSON)
+- [ ] `baseline promote` and `baseline history`
+- [ ] Email notifications
+- [ ] Borg backup provider
+- [ ] Broader Compose compatibility testing
+- [ ] SaaS layer — central dashboard, multi-host fleet
+- [ ] Compliance-grade reporting for MSPs and regulated teams
 
 ---
 
