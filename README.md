@@ -109,7 +109,7 @@ This gives you a contracted fleet immediately. Scores are marked as initial base
 | RUNNING (no healthcheck) | 85 |
 | UNHEALTHY | 40 |
 | EXITED / failed | 0 |
-| EXITED cleanly (oneshot) | 100 |
+| EXITED (oneshot) | 100 |
 
 Stack confidence is the average of all service scores, banded into risk:
 
@@ -139,14 +139,14 @@ Every finding is attributed to its source rule with severity and score impact.
 
 ## Oneshot Services
 
-Services that exit cleanly by design — migration runners, config appliers, one-shot tools like Recyclarr — are supported via a label:
+Services that exit by design — migration runners, config appliers, one-shot tools like Recyclarr — are supported via a label:
 
 ```yaml
 labels:
   com.rehearsa.oneshot: "true"
 ```
 
-A labelled service that exits with code 0 scores 100 instead of 0. Rehearsa understands the difference between a service that failed and one that finished.
+A labelled service that exits scores 100 regardless of exit code. Rehearsa understands the difference between a service that failed and one that finished.
 
 ---
 
@@ -206,6 +206,8 @@ rehearsa provider verify prod-restic
 
 Restic and Borg are supported. If the provider cannot be reached, has no snapshots, or the latest snapshot exceeds the declared maximum age, the rehearsal is blocked with a clear log message.
 
+> **Note:** Provider verification calls the `restic` or `borg` binary directly on the host. Install it alongside Rehearsa if your backup tool only runs inside a container: `sudo apt install restic`.
+
 ---
 
 ## Notifications
@@ -261,22 +263,23 @@ rehearsa coverage
 ```
 Restore Contract Coverage
 ────────────────────────────────────────────────────────────
-Coverage  [████████████████████]  100%
+Coverage  [███████████████████░]  96%
 
-  5  watched
-  5  with baseline contract
-  5  honouring contract  ✓
+  25  watched
+  24  with baseline contract
+  24  honouring contract  ✓
+   1  never rehearsed  ✗
 
 Stack                  Status               Confidence  Readiness
 ──────────────────────────────────────────────────────────────────
-immich                 ✓  CONTRACT HONOURED        94%        88%
-paperless              ✓  CONTRACT HONOURED        91%       100%
+jellyfin               ✓  CONTRACT HONOURED        90%        85%
+vaultwarden            ✓  CONTRACT HONOURED       100%        95%
+paperless              ✓  CONTRACT HONOURED        74%        85%
 ```
 
 `rehearsa coverage` exits 0 only when all contracts are honoured — making it usable as a CI gate. Use `--json` for machine-readable output.
 
 ---
-
 
 ## Tamper-Evident History
 
@@ -300,7 +303,7 @@ Rehearsa is designed to work against real-world Compose files — not idealised 
 - Disabled healthchecks
 - Both versioned and unversioned Compose formats
 
-Validated against 21 production stacks with zero fatal errors.
+Validated against 25 production stacks with zero fatal errors.
 
 If Docker can run it, Rehearsa can read it.
 

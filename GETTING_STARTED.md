@@ -19,6 +19,7 @@ Rehearsa runs a controlled restore simulation from your existing Compose file. I
 - Linux host running Docker
 - Docker socket accessible (default: `/var/run/docker.sock`)
 - `sudo` access for daemon installation
+- `restic` or `borg` installed on the host if using provider verification (see [Attach a backup provider](#attach-a-backup-provider))
 
 ---
 
@@ -91,7 +92,7 @@ The **confidence score** is the average of all service scores. The **readiness s
 | Running, no healthcheck | 85% |
 | Unhealthy | 40% |
 | Exited or failed | 0% |
-| Exited cleanly (oneshot) | 100% |
+| Exited (oneshot) | 100% |
 
 | Confidence | Risk band |
 |---|---|
@@ -239,6 +240,12 @@ Useful flags:
 
 Rehearsa can verify that a real backup snapshot exists — and is recent enough — before each rehearsal. This closes the loop: not just "can this stack restore?" but "can it restore from a backup that actually exists right now?"
 
+> **Prerequisite:** Provider verification calls the `restic` or `borg` binary directly on the host. If your backup tool only runs inside a Docker container, install it on the host too:
+> ```bash
+> sudo apt install restic      # Debian/Ubuntu
+> sudo apt install borgbackup  # for Borg
+> ```
+
 ```bash
 # Register a Restic repository
 rehearsa provider add prod-restic \
@@ -306,7 +313,6 @@ rehearsa report --format both --output ./reports/
 
 ---
 
-
 ## Concurrency and CPU usage
 
 By default Rehearsa runs one rehearsal at a time. This is intentional — it keeps CPU usage predictable on low-power hardware (Raspberry Pi, older i3/i5 machines, ARM single-board computers).
@@ -338,14 +344,16 @@ Start at 1. If rehearsals are completing without CPU issues, try 2. Each rehears
 
 ## Oneshot services
 
-Migration runners, config appliers, and tools like Recyclarr exit cleanly by design. Without a label, Rehearsa scores an exited container as 0. Add this label to tell Rehearsa the exit was intentional:
+Migration runners, config appliers, backup scripts, and tools like Recyclarr exit by design. Without a label, Rehearsa scores an exited container as 0. Add this label to tell Rehearsa the exit was intentional:
 
 ```yaml
 labels:
   com.rehearsa.oneshot: "true"
 ```
 
-A labelled service that exits with code 0 scores 100.
+A labelled service scores 100 on any exit — the contract is that it started and ran, not that it succeeded at its task in a simulation environment.
+
+> **Note for Portainer users:** Portainer may strip labels when re-serialising your stack on deploy. If a oneshot service is still scoring 0 after adding the label, verify the label is present in the file on disk with `grep -A3 labels /path/to/docker-compose.yml`.
 
 ---
 
@@ -387,9 +395,9 @@ After that, Rehearsa runs silently in the background. You'll only hear from it w
 | `rehearsa daemon set-concurrency <n>` | Set max simultaneous rehearsals |
 | `rehearsa daemon config` | Show daemon configuration |
 | `rehearsa policy set <stack>` | Set restore policy |
-| `rehearsa provider add <name>` | Register a backup provider |
-| `rehearsa provider verify <name>` | Verify provider health |
-| `rehearsa notify add <name>` | Register a notification channel |
+| `rehearsa provider add <n>` | Register a backup provider |
+| `rehearsa provider verify <n>` | Verify provider health |
+| `rehearsa notify add <n>` | Register a notification channel |
 | `rehearsa report` | Generate a compliance report |
 | `rehearsa history show <stack>` | View run history |
 | `rehearsa cleanup` | Remove orphaned rehearsal containers |
