@@ -491,11 +491,19 @@ async fn main() {
         Commands::Baseline { command } => match command {
 
             BaselineCommands::Set { compose_file } => {
-                let stack_name = std::path::Path::new(&compose_file)
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
+                let compose_path = std::path::Path::new(&compose_file);
+                let stack_name = compose_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.is_empty() && n != ".")
+                    .unwrap_or_else(|| {
+                        compose_path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    });
 
                 if let Some(latest) = history::load_latest(&stack_name) {
                     let baseline = StackBaseline {

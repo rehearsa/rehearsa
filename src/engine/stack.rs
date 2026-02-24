@@ -522,6 +522,22 @@ let record = RunRecord {
 
 let _ = persist(&record);
 
+if !json_output {
+    println!();
+    println!(
+        "✓ confidence {}%  readiness {}%  risk {}  duration {}s",
+        confidence, readiness.score, risk, duration
+    );
+    println!();
+    if baseline_drift_detected {
+        println!("DRIFT DETECTED");
+    } else if policy_violation {
+        println!("POLICY VIOLATION");
+    } else {
+        println!("CONTRACT HONOURED");
+    }
+}
+
 Ok(summary)
 }
 // ======================================================
